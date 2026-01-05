@@ -18,6 +18,12 @@ typedef struct Context {
 
     VkSurfaceKHR surface;
     GLFWwindow* win;
+
+    VkPhysicalDevice phys_dev;
+    int32_t graphics_queue_family_index;
+    int32_t present_queue_family_index;
+
+    VkDevice log_dev;
 } Context;
 
 static bool _create_instance(Context* ctx) {
@@ -58,11 +64,106 @@ static bool _create_vulkan_surface(Context* ctx) {
     return true;
 }
 
+static bool _pick_phys_dev(Context* ctx) {
+    uint32_t n_phys_dev;
+    vkEnumeratePhysicalDevices(ctx->instance, &n_phys_dev, NULL);
+    if (n_phys_dev == 0) {
+        fprintf(stderr, "failed didnt find any GPUs supporing vulkan\n");
+        return false;
+    }
+
+    VkPhysicalDevice devs[8];
+    vkEnumeratePhysicalDevices(ctx->instance, &n_phys_dev, devs);
+
+    for (int32_t i = 0; i < n_phys_dev; i++) {
+        VkPhysicalDevice dev = devs[i];
+        uint32_t n_queues;
+        vkGetPhysicalDeviceQueueFamilyProperties(dev, &n_queues, NULL);
+
+        VkQueueFamilyProperties props[8];
+        vkGetPhysicalDeviceQueueFamilyProperties(dev, &n_queues, props);
+
+        int32_t graphics_queue_family_index = -1;
+        int32_t present_queue_family_index = -1;
+        for (int32_t j = 0; j < n_queues; j++) {
+            if (props[j].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                graphics_queue_family_index = j;
+            }
+
+            VkBool32 supported = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(dev, j, ctx->surface, &supported);
+            if (supported) {
+                present_queue_family_index = j;
+                if (graphics_queue_family_index != -1) break;
+            }
+        }
+        if (graphics_queue_family_index != -1 && present_queue_family_index != -1) {
+            ctx->phys_dev = devs[i];
+            ctx->graphics_queue_family_index = graphics_queue_family_index;
+            ctx->present_queue_family_index = present_queue_family_index;
+            
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(ctx->phys_dev, &props);
+            fprintf(stderr, "picked GPU: %s\n", props.deviceName);
+
+            return true;
+        }
+    }
+    fprintf(stderr, "failed to pick GPU\n");
+
+    return false;
+}
+
+static bool _create_logical_device(Context* ctx) {
+    VkDeviceQueueCreateInfo queue_infos[2];
+
+    float priority = 1.0f;
+
+    uint32_t n_queues = 0;
+    queue_infos[0] = (VkDeviceQueueCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = ctx->graphics_queue_family_index,
+        .queueCount = 1,
+        .pQueuePriorities = &priority,
+    };
+    n_queues++;
+
+    if (ctx->graphics_queue_family_index != ctx->present_queue_family_index) {
+        queue_infos[1] = (VkDeviceQueueCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = ctx->present_queue_family_index,
+            .queueCount = 1,
+            .pQueuePriorities = &priority,
+        };
+        n_queues++;
+    }
+
+    const char* device_exts[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+
+    const VkDeviceCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pQueueCreateInfos = queue_infos,
+        .queueCreateInfoCount = n_queues,
+        .enabledExtensionCount = 1,
+        .ppEnabledExtensionNames = device_exts,
+    };
+    if (vkCreateDevice(ctx->phys_dev, &create_info, NULL, &ctx->log_dev) != VK_SUCCESS) {
+        fprintf(stderr, "failed to crate logical device\n");
+        return false;
+    }
+    fprintf(stderr, "created logical device\n");
+
+    return true;
+}
+
 int main() {
     if (!glfwInit()) {
         return -1;
     }
 
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(800, 600, "Fire app", NULL, NULL);
     if (!window) {
         glfwTerminate();
@@ -84,9 +185,10 @@ int main() {
     ctx.layers = layers;
     if (!_create_instance(&ctx)) exit(1);
     if (!_create_vulkan_surface(&ctx)) exit(1);
+    if (!_pick_phys_dev(&ctx)) exit(1);
+    if (!_create_logical_device(&ctx)) exit(1);
 
     while (!glfwWindowShouldClose(window)) {
-        glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
