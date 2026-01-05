@@ -10,6 +10,18 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+typedef struct Swapchain {
+    VkSwapchainKHR swapchain_handle;
+    VkImageView* imgs_viws;
+    VkImage* imgs;
+    uint32_t n_imgs;
+
+    VkExtent2D dim;
+    VkFormat swapchain_fmt;
+    VkSurfaceFormatKHR surf_fmt;
+    VkPresentModeKHR surf_present_mode;
+} Swapchain;
+
 typedef struct Context {
     VkInstance instance;
     const char** layers;
@@ -24,7 +36,18 @@ typedef struct Context {
     int32_t present_queue_family_index;
 
     VkDevice log_dev;
+    VkQueue graphics_queue;
+    VkQueue present_queue;
 } Context;
+
+typedef struct SwapchainInfo {
+    VkSurfaceFormatKHR* surf_fmts;
+    uint32_t n_fmts;
+    VkPresentModeKHR* surf_present_modes;
+    uint32_t n_present_modes;
+
+    VkSurfaceCapabilitiesKHR caps;
+} SwapchainInfo;
 
 static bool _create_instance(Context* ctx) {
     const VkApplicationInfo app_info = {
@@ -109,6 +132,10 @@ static bool _pick_phys_dev(Context* ctx) {
             return true;
         }
     }
+
+    vkGetDeviceQueue(ctx->log_dev, ctx->graphics_queue_family_index, 0, &ctx->graphics_queue);
+    vkGetDeviceQueue(ctx->log_dev, ctx->present_queue_family_index, 0, &ctx->present_queue);
+
     fprintf(stderr, "failed to pick GPU\n");
 
     return false;
@@ -155,6 +182,18 @@ static bool _create_logical_device(Context* ctx) {
     }
     fprintf(stderr, "created logical device\n");
 
+    return true;
+}
+
+static void _get_swapchain_info(Context* ctx, SwapchainInfo* o_info) {
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phys_dev, ctx->surface, &o_info->caps);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx->phys_dev, ctx->surface, &o_info->n_fmts, NULL);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx->phys_dev, ctx->surface, &o_info->n_fmts, o_info->surf_fmts);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phys_dev, ctx->surface, &o_info->n_present_modes, NULL);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phys_dev, ctx->surface, &o_info->n_present_modes, o_info->surf_present_modes);
+}
+
+static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, uint32_t h) {
     return true;
 }
 
