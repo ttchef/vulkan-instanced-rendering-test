@@ -64,6 +64,9 @@ typedef struct Context {
     VkQueue present_queue;
 
     Swapchain swapchain;
+
+    VkPipelineLayout pip_layout;
+    VkPipeline pip;
 } Context;
 
 typedef struct SwapchainInfo {
@@ -268,10 +271,6 @@ static bool _create_logical_device(Context* ctx) {
         n_queues++;
     }
 
-    const char* device_exts[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    };
-
     bool support_dym_rendering = false;
     ApiVersion api_version = _get_vulkan_api_version();
     bool api_version_above_1_3 = (api_version.major < 1) || (api_version.minor >= 3);
@@ -291,6 +290,13 @@ static bool _create_logical_device(Context* ctx) {
         return false;
     }
 
+
+    const char* device_exts[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        (!api_version_above_1_3) ? "" : VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+    };
+
+   
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
         .dynamicRendering = true,
@@ -430,8 +436,193 @@ static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, 
     return true;
 }
 
-static bool _create_frameloop(Context* ctx) {
+static bool _create_shader_module(Context* ctx, VkShaderModule* module, const char* filename) {
+    FILE* shader_fd = fopen(filename, "rb");
+    if (!shader_fd) {
+        fprintf(stderr, "failed to read vertex shader file\n");
+        return false;
+    }
 
+    fseek(shader_fd, 0, SEEK_END);
+    int64_t shader_size = ftell(shader_fd);
+    rewind(shader_fd);
+
+    if ((shader_size & 0x03) != 0) {
+        fprintf(stderr, "shader error: command is not 4 bytes long\n");
+        fclose(shader_fd);
+        return false;
+    }
+
+    uint8_t shader_string[shader_size + 1];
+    fread(shader_string, 1, shader_size, shader_fd);
+    fclose(shader_fd);
+
+    VkShaderModuleCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = shader_size, 
+        .pCode = (uint32_t*)shader_string,
+    };
+
+    if (vkCreateShaderModule(ctx->log_dev, &create_info, NULL, module) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create shader module: %s\n", filename);
+        return false;
+    }
+
+    return true;
+}
+
+static bool _create_pipeline(Context* ctx) {
+
+    VkShaderModule vertex_module;
+    _create_shader_module(ctx, &vertex_module, "default_vert.spv");
+
+    VkShaderModule fragment_module;
+    _create_shader_module(ctx, &fragment_module, "default_frag.spv");
+
+    VkPipelineShaderStageCreateInfo shader_stages[2];
+    shader_stages[0] = (VkPipelineShaderStageCreateInfo) {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertex_module,
+        .pName = "main",
+    };
+
+    shader_stages[1] = (VkPipelineShaderStageCreateInfo) {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragment_module,
+        .pName = "main",
+    };
+
+    VkVertexInputBindingDescription binding_desc = {
+        .binding = 0,
+        .stride = sizeof(float) * 3,
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+
+    VkVertexInputAttributeDescription attrib_desc = {
+        .binding = 0,
+        .location = 0,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = 0,
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding_desc,
+        .vertexAttributeDescriptionCount = 1,
+        .pVertexAttributeDescriptions = &attrib_desc,
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo assembly_input_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1,
+    };
+
+    VkPipelineRasterizationStateCreateInfo rast_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .lineWidth = 1.0f,
+    };
+
+    VkPipelineRenderingCreateInfoKHR dynamic_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &ctx->swapchain.swapchain_fmt,
+        .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisample_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthBoundsTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
+        .minDepthBounds = 0.0f,
+        .maxDepthBounds = 1.0f,
+    };
+
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+
+    VkPipelineColorBlendStateCreateInfo color_blend_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+
+    VkDynamicState dynamic_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamic_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2,
+        .pDynamicStates = dynamic_states,
+    };
+
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    };
+
+    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->pip_layout) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create pipeline layout\n");
+        vkDestroyShaderModule(ctx->log_dev, vertex_module, NULL);
+        vkDestroyShaderModule(ctx->log_dev, fragment_module, NULL);
+        return false;
+    }
+
+    fprintf(stderr, "created pipeline layout\n");
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &dynamic_info,
+        .layout = ctx->pip_layout,
+        .stageCount = 2,
+        .pStages = shader_stages,
+        .pVertexInputState = &vertex_input_state,
+        .pInputAssemblyState = &assembly_input_state,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rast_state,
+        .pMultisampleState = &multisample_state,
+        .pDepthStencilState = &depth_stencil_state,
+        .pColorBlendState = &color_blend_state,
+        .pDynamicState = &dynamic_state,
+        .renderPass = VK_NULL_HANDLE, // just so we are really really sure
+    };
+
+    if (vkCreateGraphicsPipelines(ctx->log_dev, 0, 1, &create_info, NULL, &ctx->pip) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create vulkan pipeline\n");
+        return false;
+    }
+
+    vkDestroyShaderModule(ctx->log_dev, vertex_module, NULL);
+    vkDestroyShaderModule(ctx->log_dev, fragment_module, NULL);
+
+    fprintf(stderr, "created graphics pipeline\n");
+
+    return true;
 }
 
 int main() {
@@ -472,6 +663,7 @@ int main() {
     if (!_pick_phys_dev(&ctx)) exit(1);
     if (!_create_logical_device(&ctx)) exit(1);
     if (!_create_swapchain(&ctx, &ctx.swapchain, 800, 600)) exit(1);
+    if (!_create_pipeline(&ctx)) exit(1);
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
