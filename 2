@@ -75,26 +75,6 @@ typedef struct SwapchainInfo {
     VkSurfaceCapabilitiesKHR caps;
 } SwapchainInfo;
 
-typedef struct ApiVersion {
-    uint32_t major;
-    uint32_t minor;
-    uint32_t patch;
-} ApiVersion;
-
-static ApiVersion _get_vulkan_api_version() {
-    uint32_t instance_version;
-    if (vkEnumerateInstanceVersion(&instance_version) != VK_SUCCESS) {
-        fprintf(stderr, "failed to get instance version\n");
-        exit(1);
-    }
-
-    return (ApiVersion){
-        .major = VK_API_VERSION_MAJOR(instance_version),
-        .minor = VK_API_VERSION_MINOR(instance_version),
-        .patch = VK_API_VERSION_PATCH(instance_version),
-    };
-}
-
 static VKAPI_ATTR VkBool32 VKAPI_CALL _debug_callback(
     VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
     VkDebugUtilsMessageTypeFlagsEXT message_type,
@@ -108,18 +88,6 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL _debug_callback(
 static bool _device_extension_supported(Context* ctx, const char* name) {
     uint32_t num_extensions = 0;
     vkEnumerateDeviceExtensionProperties(ctx->phys_dev, NULL, &num_extensions, NULL);
-    
-    if (num_extensions == 0) {
-        fprintf(stderr, "found 0 device extensions\n");
-        exit(1);
-    }
-
-    VkExtensionProperties props[num_extensions];
-    vkEnumerateDeviceExtensionProperties(ctx->phys_dev, NULL, &num_extensions, props);
-
-    for (int32_t i = 0; i < num_extensions; i++) {
-        if (strcmp(name, props[i].extensionName) == 0) return true;
-    }
 
     return false;
 }
@@ -272,33 +240,8 @@ static bool _create_logical_device(Context* ctx) {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
 
-    bool support_dym_rendering = false;
-    ApiVersion api_version = _get_vulkan_api_version();
-    bool api_version_above_1_3 = (api_version.major < 1) || (api_version.minor >= 3);
-
-    if (api_version_above_1_3) {
-        fprintf(stderr, "your GPU supports dynamic rendering\n");
-        support_dym_rendering = true;
-    } 
-    else {
-        support_dym_rendering = _device_extension_supported(ctx, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-        if (support_dym_rendering) {
-            fprintf(stderr, "your GPU supports dynamic rendering\n");
-        }
-    }
-    if (!support_dym_rendering) {
-        fprintf(stderr, "your gpus doesnt support dynamic rendering\n");
-        return false;
-    }
-
-    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
-        .dynamicRendering = true,
-    };
-
     const VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &dynamic_rendering_feature,
         .pQueueCreateInfos = queue_infos,
         .queueCreateInfoCount = n_queues,
         .enabledExtensionCount = 1,
