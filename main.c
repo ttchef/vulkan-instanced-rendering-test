@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -25,7 +26,27 @@ typedef struct Swapchain {
     VkPresentModeKHR surf_present_mode;
 } Swapchain;
 
+#define CR_MAX_FRAMES 2
+typedef struct Frame {
+    VkSemaphore image_available;
+    VkSemaphore* finished;
+
+    VkFence in_flight_fence;
+
+} Frame;
+
+typedef struct Frameloop {
+    VkFramebuffer* fmts;
+    uint32_t n_fmts;
+
+    VkRenderPass render_pass;
+
+    Frame frames[CR_MAX_FRAMES];
+    uint32_t frame_idk;
+} Frameloop;
+
 typedef struct Context {
+    VkDebugUtilsMessengerEXT db_messenger;
     VkInstance instance;
     const char** layers;
     const char** exts;
@@ -54,6 +75,16 @@ typedef struct SwapchainInfo {
     VkSurfaceCapabilitiesKHR caps;
 } SwapchainInfo;
 
+static VKAPI_ATTR VkBool32 VKAPI_CALL _debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+    VkDebugUtilsMessageTypeFlagsEXT message_type,
+    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+    void* user_data) {
+    fprintf(stderr, "Validation: %s\n", callback_data->pMessage);
+
+    return VK_FALSE;
+}
+
 static bool _create_instance(Context* ctx) {
     const VkApplicationInfo app_info = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -80,6 +111,34 @@ static bool _create_instance(Context* ctx) {
 
     return true;
 }
+
+static bool _create_debug_messenger(Context* ctx) {
+    VkDebugUtilsMessengerCreateInfoEXT create_info = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | 
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = _debug_callback,
+    };
+
+    PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+                                                                        ctx->instance,
+                                                                        "vkCreateDebugUtilsMessengerEXT");
+    if (!vkCreateDebugUtilsMessengerEXT) {
+        fprintf(stderr, "debug messenger extension not present\n");
+        return false;
+    }
+    if (vkCreateDebugUtilsMessengerEXT(ctx->instance, &create_info, NULL, &ctx->db_messenger) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create debug messenger\n");
+        return false;
+    }
+
+    fprintf(stderr, "created debug messenger\n");
+
+    return true;
+}
+
 
 static bool _create_vulkan_surface(Context* ctx) {
     glfwCreateWindowSurface(ctx->instance, ctx->win, NULL, &ctx->surface);
@@ -307,6 +366,10 @@ static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, 
     return true;
 }
 
+static bool _create_frameloop(Context* ctx) {
+
+}
+
 int main() {
     if (!glfwInit()) {
         return -1;
@@ -319,8 +382,16 @@ int main() {
         exit(1);
     }
 
-    uint32_t n_exts;
-    const char** exts = glfwGetRequiredInstanceExtensions(&n_exts);
+    uint32_t n_glfw_exts;
+    const char** glfw_exts = glfwGetRequiredInstanceExtensions(&n_glfw_exts);
+
+    uint32_t n_exts = n_glfw_exts + 1;
+    const char* exts[n_exts];
+    for (int32_t i = 0; i < n_glfw_exts; i++) {
+        exts[i] = glfw_exts[i];
+    }
+    exts[n_glfw_exts] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+
 
     const char* layers[] = {
         "VK_LAYER_KHRONOS_validation",
@@ -333,6 +404,7 @@ int main() {
     ctx.n_layers = 1;
     ctx.layers = layers;
     if (!_create_instance(&ctx)) exit(1);
+    if (!_create_debug_messenger(&ctx)) exit(1);
     if (!_create_vulkan_surface(&ctx)) exit(1);
     if (!_pick_phys_dev(&ctx)) exit(1);
     if (!_create_logical_device(&ctx)) exit(1);
