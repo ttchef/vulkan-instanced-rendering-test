@@ -10,6 +10,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
     VkImageView* imgs_viws;
@@ -38,6 +41,8 @@ typedef struct Context {
     VkDevice log_dev;
     VkQueue graphics_queue;
     VkQueue present_queue;
+
+    Swapchain swapchain;
 } Context;
 
 typedef struct SwapchainInfo {
@@ -188,12 +193,117 @@ static bool _create_logical_device(Context* ctx) {
 static void _get_swapchain_info(Context* ctx, SwapchainInfo* o_info) {
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx->phys_dev, ctx->surface, &o_info->caps);
     vkGetPhysicalDeviceSurfaceFormatsKHR(ctx->phys_dev, ctx->surface, &o_info->n_fmts, NULL);
+    o_info->surf_fmts = calloc(o_info->n_fmts, sizeof(*o_info->surf_fmts));
     vkGetPhysicalDeviceSurfaceFormatsKHR(ctx->phys_dev, ctx->surface, &o_info->n_fmts, o_info->surf_fmts);
     vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phys_dev, ctx->surface, &o_info->n_present_modes, NULL);
+    o_info->surf_present_modes = calloc(o_info->n_present_modes, sizeof(*o_info->surf_present_modes));
     vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->phys_dev, ctx->surface, &o_info->n_present_modes, o_info->surf_present_modes);
 }
 
+static VkSurfaceFormatKHR _get_swapchain_format(VkSurfaceFormatKHR* fmts, uint32_t n_fmts) {
+    for (int32_t i = 0; i < n_fmts; i++) {
+        if (fmts[i].format == VK_FORMAT_B8G8R8_SRGB && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            return fmts[i];
+        }
+    }
+    return fmts[0];
+}
+
+static VkPresentModeKHR _get_swapchain_present_mode(VkPresentModeKHR* modes, uint32_t n_modes) {
+    for (int32_t i = 0; i < n_modes; i++) {
+        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)  {
+            return modes[i];
+        }
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+static VkExtent2D _get_swapchain_extent(const VkSurfaceCapabilitiesKHR* caps, uint32_t w, uint32_t h) {
+    VkExtent2D extent = (VkExtent2D){
+        .width = w,
+        .height = h,
+    };
+
+    extent.width = MIN(caps->maxImageExtent.width, extent.width);
+    extent.height = MIN(caps->maxImageExtent.height, extent.height);
+    extent.width = MAX(caps->minImageExtent.width, extent.width);
+    extent.height = MAX(caps->minImageExtent.height, extent.height);
+    return extent;
+}
+
 static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, uint32_t h) {
+    SwapchainInfo info;
+    _get_swapchain_info(ctx, &info);
+    
+    VkSurfaceFormatKHR fmt = _get_swapchain_format(info.surf_fmts, info.n_fmts);
+    VkPresentModeKHR mode = _get_swapchain_present_mode(info.surf_present_modes, info.n_present_modes);
+
+    VkExtent2D extent = _get_swapchain_extent(&info.caps, w, h);
+
+    uint32_t n_imgs = info.caps.minImageCount + 1;
+    if (info.caps.maxImageCount > 0 && n_imgs > info.caps.maxImageCount) {
+        n_imgs = info.caps.maxImageCount;
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_info = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = ctx->surface,
+        .minImageCount = n_imgs,
+        .imageFormat = fmt.format,
+        .imageExtent = extent,
+        .imageColorSpace = fmt.colorSpace,
+        .presentMode = mode,
+        .preTransform = info.caps.currentTransform, 
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .clipped = VK_TRUE,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+    };
+
+    if (ctx->graphics_queue_family_index != ctx->present_queue_family_index) {
+        swapchain_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        uint32_t families[2] = {
+            ctx->graphics_queue_family_index,
+            ctx->present_queue_family_index,
+        };
+        swapchain_info.pQueueFamilyIndices = families;
+    }
+    else {
+        swapchain_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+
+    vkCreateSwapchainKHR(ctx->log_dev, &swapchain_info, NULL, &o_swapchain->swapchain_handle);
+    vkGetSwapchainImagesKHR(ctx->log_dev, o_swapchain->swapchain_handle, &o_swapchain->n_imgs, NULL);
+    o_swapchain->imgs = calloc(o_swapchain->n_imgs, sizeof(VkImage));
+    vkGetSwapchainImagesKHR(ctx->log_dev, o_swapchain->swapchain_handle, &o_swapchain->n_imgs, o_swapchain->imgs);
+    
+    o_swapchain->imgs_viws = calloc(o_swapchain->n_imgs, sizeof(VkImageView));
+    o_swapchain->surf_present_mode = mode;
+    o_swapchain->swapchain_fmt = fmt.format;
+    o_swapchain->surf_fmt = fmt;
+    o_swapchain->dim = extent;
+
+    for (int32_t i = 0; i < o_swapchain->n_imgs; i++) {
+        const VkImageViewCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = o_swapchain->imgs[i],
+            .format = o_swapchain->swapchain_fmt,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = 1,
+            },
+
+        };
+        if (vkCreateImageView(ctx->log_dev, &info, NULL, &o_swapchain->imgs_viws[i]) != VK_SUCCESS) {
+            fprintf(stderr, "failed to create vulkan swapchain\n");
+            return false;
+        }
+    }
+    
+    fprintf(stderr, "created vulkan swapchain\n");
+
     return true;
 }
 
@@ -226,6 +336,7 @@ int main() {
     if (!_create_vulkan_surface(&ctx)) exit(1);
     if (!_pick_phys_dev(&ctx)) exit(1);
     if (!_create_logical_device(&ctx)) exit(1);
+    if (!_create_swapchain(&ctx, &ctx.swapchain, 800, 600)) exit(1);
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
