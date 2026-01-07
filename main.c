@@ -235,9 +235,6 @@ static bool _pick_phys_dev(Context* ctx) {
         }
     }
 
-    vkGetDeviceQueue(ctx->log_dev, ctx->graphics_queue_family_index, 0, &ctx->graphics_queue);
-    vkGetDeviceQueue(ctx->log_dev, ctx->present_queue_family_index, 0, &ctx->present_queue);
-
     fprintf(stderr, "failed to pick GPU\n");
 
     return false;
@@ -310,6 +307,11 @@ static bool _create_logical_device(Context* ctx) {
         fprintf(stderr, "failed to crate logical device\n");
         return false;
     }
+
+    vkGetDeviceQueue(ctx->log_dev, ctx->graphics_queue_family_index, 0, &ctx->graphics_queue);
+    vkGetDeviceQueue(ctx->log_dev, ctx->present_queue_family_index, 0, &ctx->present_queue);
+
+
     fprintf(stderr, "created logical device\n");
 
     return true;
@@ -505,10 +507,10 @@ static bool _create_pipeline(Context* ctx) {
 
     VkPipelineVertexInputStateCreateInfo vertex_input_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
+        /*.vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &binding_desc,
         .vertexAttributeDescriptionCount = 1,
-        .pVertexAttributeDescriptions = &attrib_desc,
+        .pVertexAttributeDescriptions = &attrib_desc,*/
     };
 
     VkPipelineInputAssemblyStateCreateInfo assembly_input_state = {
@@ -745,7 +747,67 @@ static bool _record_command_buffers(Context* ctx) {
     return true;
 }
 
+static bool _render_loop(Context* ctx) {
+    FrameData* data = &ctx->frame_data[ctx->frame_idx];
+    
+    vkWaitForFences(ctx->log_dev, 1, &data->in_flight_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(ctx->log_dev, 1, &data->in_flight_fence);
 
+    if (vkAcquireNextImageKHR(ctx->log_dev, ctx->swapchain.swapchain_handle, UINT64_MAX,
+                              data->image_available, VK_NULL_HANDLE, &ctx->img_idx) != VK_SUCCESS) {
+        fprintf(stderr, "failed to acquire next swapchain image\n");
+        return false;
+    }
+
+    vkResetCommandBuffer(data->cmd_buffer, 0);
+    _record_command_buffers(ctx);
+
+    VkSemaphore wait_sems[] = {
+        data->image_available,
+    };
+
+    VkPipelineStageFlags wait_stages[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    };
+
+    VkSemaphore signal_sems[] = {
+        data->finished,
+    };
+
+    VkSubmitInfo sub_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = wait_sems,
+        .pWaitDstStageMask = wait_stages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &data->cmd_buffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = signal_sems,
+    };
+
+    if (vkQueueSubmit(ctx->graphics_queue, 1, &sub_info, data->in_flight_fence) != VK_SUCCESS) {
+        fprintf(stderr, "failed to submit graphics queue\n");
+        return false;
+    }
+
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = signal_sems,
+        .swapchainCount = 1,
+        .pSwapchains = &ctx->swapchain.swapchain_handle,
+        .pImageIndices = &ctx->img_idx,
+    };
+
+    if (vkQueuePresentKHR(ctx->graphics_queue, &present_info) != VK_SUCCESS) {
+        fprintf(stderr, "failed to present graphics queue\n");
+        return false;
+    }
+
+    ctx->frame_idx = (ctx->frame_idx + 1) % FRAMES_IN_FLIGHT;
+
+    return true;
+}
 
 int main() {
     if (!glfwInit()) {
@@ -773,7 +835,7 @@ int main() {
         "VK_LAYER_KHRONOS_validation",
     };
 
-    Context ctx;
+    Context ctx = {0};
     ctx.win = window;
     ctx.n_exts = n_exts;
     ctx.exts = exts;
@@ -789,6 +851,7 @@ int main() {
     if (!_create_frame_data(&ctx)) exit(1);
 
     while (!glfwWindowShouldClose(window)) {
+        _render_loop(&ctx);
         glfwPollEvents();
     }
 
