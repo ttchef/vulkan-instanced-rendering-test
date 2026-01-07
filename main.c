@@ -739,6 +739,20 @@ static bool _record_command_buffers(Context* ctx) {
 
     vkCmdEndRendering(data->cmd_buffer);
 
+    VkImageMemoryBarrier mem_ber = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .image = ctx->swapchain.imgs[ctx->img_idx],
+        .subresourceRange = {
+            .layerCount = 1,
+            .levelCount = 1,
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        },
+    };
+
+    vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0, 0, NULL, 0, NULL, 1, &mem_ber);
+
     if (vkEndCommandBuffer(data->cmd_buffer) != VK_SUCCESS) {
         fprintf(stderr, "failed to end command buffer recording\n");
         return false;
