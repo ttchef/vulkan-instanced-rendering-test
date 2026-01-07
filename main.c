@@ -14,6 +14,8 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+#define FRAMES_IN_FLIGHT 3
+
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
     VkImageView* imgs_viws;
@@ -26,24 +28,13 @@ typedef struct Swapchain {
     VkPresentModeKHR surf_present_mode;
 } Swapchain;
 
-#define CR_MAX_FRAMES 2
-typedef struct Frame {
+typedef struct FrameData {
     VkSemaphore image_available;
-    VkSemaphore* finished;
+    VkSemaphore finished;
 
     VkFence in_flight_fence;
-
-} Frame;
-
-typedef struct Frameloop {
-    VkFramebuffer* fmts;
-    uint32_t n_fmts;
-
-    VkRenderPass render_pass;
-
-    Frame frames[CR_MAX_FRAMES];
-    uint32_t frame_idk;
-} Frameloop;
+    VkCommandBuffer cmd_buffer;
+} FrameData;
 
 typedef struct Context {
     VkDebugUtilsMessengerEXT db_messenger;
@@ -67,6 +58,11 @@ typedef struct Context {
 
     VkPipelineLayout pip_layout;
     VkPipeline pip;
+
+    VkCommandPool cmd_pool;
+    FrameData frame_data[FRAMES_IN_FLIGHT];
+    int32_t frame_idx;
+    int32_t img_idx;
 } Context;
 
 typedef struct SwapchainInfo {
@@ -625,6 +621,132 @@ static bool _create_pipeline(Context* ctx) {
     return true;
 }
 
+static bool _create_frame_data(Context* ctx) {
+    VkCommandPoolCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = ctx->graphics_queue_family_index,
+    };
+
+    if (vkCreateCommandPool(ctx->log_dev, &create_info, NULL, &ctx->cmd_pool) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create command pool\n");
+        return false;
+    }
+
+    fprintf(stderr, "created command pool\n");
+
+    VkSemaphoreCreateInfo sem_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+
+    for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkCommandBufferAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = ctx->cmd_pool,
+            .commandBufferCount = 1,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        };
+
+        if (vkAllocateCommandBuffers(ctx->log_dev, &alloc_info, &ctx->frame_data[i].cmd_buffer) != VK_SUCCESS) {
+            fprintf(stderr, "failed to create command buffer\n");
+            return false;
+        }
+
+        if (vkCreateSemaphore(ctx->log_dev, &sem_info, NULL, &ctx->frame_data[i].image_available) != VK_SUCCESS) {
+            fprintf(stderr, "failed to create semaphore\n");
+            return false;
+        }
+
+        if (vkCreateSemaphore(ctx->log_dev, &sem_info, NULL, &ctx->frame_data[i].finished) != VK_SUCCESS) {
+            fprintf(stderr, "failed to create semaphore\n");
+            return false;
+        }
+
+        if (vkCreateFence(ctx->log_dev, &fence_info, NULL, &ctx->frame_data[i].in_flight_fence) != VK_SUCCESS) {
+            fprintf(stderr, "failed to create fence\n");
+            return false;
+        }
+    }
+
+    fprintf(stderr, "created frame data\n");
+
+    return true;
+}
+
+static bool _record_command_buffers(Context* ctx) {
+    FrameData* data = &ctx->frame_data[ctx->frame_idx];
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    };
+
+    if (vkBeginCommandBuffer(data->cmd_buffer, &begin_info) != VK_SUCCESS) {
+        fprintf(stderr, "failed beginning command buffer recording\n");
+        return false;
+    }
+
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pip);
+
+    VkViewport viewport = {
+        .width = ctx->swapchain.dim.width,
+        .height = ctx->swapchain.dim.height,
+        .maxDepth = 1.0f,
+    };
+
+    VkRect2D scissor = {
+        .extent = ctx->swapchain.dim,
+        .offset = (VkOffset2D){0, 0},
+    };
+
+    vkCmdSetViewport(data->cmd_buffer, 0, 1, &viewport);
+    vkCmdSetScissor(data->cmd_buffer, 0, 1, &scissor);
+
+    VkClearValue clear_color = {
+        .color = {{0.0f, 0.0f, 0.0f, 1.0f}},
+    };
+
+    VkRenderingAttachmentInfoKHR color_attachment_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
+        .imageView = ctx->swapchain.imgs_viws[ctx->img_idx],
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = clear_color,
+    };
+
+    VkRenderingInfoKHR render_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment_info,
+        .renderArea = {
+            .offset = (VkOffset2D){0, 0},
+            .extent = ctx->swapchain.dim,
+        },
+    };
+
+    vkCmdBeginRendering(data->cmd_buffer, &render_info);
+
+    // TODO: do draw call
+    vkCmdDraw(data->cmd_buffer, 3, 1, 0, 0);
+
+    vkCmdEndRendering(data->cmd_buffer);
+
+    if (vkEndCommandBuffer(data->cmd_buffer) != VK_SUCCESS) {
+        fprintf(stderr, "failed to end command buffer recording\n");
+        return false;
+    }
+
+    return true;
+}
+
+
+
 int main() {
     if (!glfwInit()) {
         return -1;
@@ -664,6 +786,7 @@ int main() {
     if (!_create_logical_device(&ctx)) exit(1);
     if (!_create_swapchain(&ctx, &ctx.swapchain, 800, 600)) exit(1);
     if (!_create_pipeline(&ctx)) exit(1);
+    if (!_create_frame_data(&ctx)) exit(1);
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
