@@ -2,4 +2,9 @@
 all:
 	glslc -fshader-stage=vert default.vert -o default_vert.spv
 	glslc -fshader-stage=frag default.frag -o default_frag.spv
-	gcc main.c -o main -lglfw -lvulkan
+	g++ -c vma.cpp -o vma.o
+	gcc -c main.c -o main.o
+	gcc main.o vma.o -o main -lglfw -lvulkan -lstdc++
+
+clean:
+	rm -rf main *.o *.spv
