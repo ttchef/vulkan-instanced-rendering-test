@@ -1,9 +1,9 @@
 #version 450
 
 layout (location = 0) in vec2 in_pos;
-layout (location = 1) in vec3 in_color;
+layout (location = 1) in vec4 in_color;
 
-layout(location = 0) out vec3 vColor;
+layout(location = 0) out vec4 vColor;
 
 void main() {
     const vec2 pos[3] = vec2[](

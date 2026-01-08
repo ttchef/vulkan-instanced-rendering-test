@@ -19,7 +19,7 @@
 
 #define FRAMES_IN_FLIGHT 3
 
-#define PARTICLE_COUNT 100000
+#define PARTICLE_COUNT 1000000
 
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
@@ -116,16 +116,17 @@ typedef struct Vec2 {
     float y;
 } Vec2;
 
-typedef struct Vec3 {
+typedef struct Vec4 {
     float x;
     float y;
     float z;
-} Vec3;
+    float w;
+} Vec4;
 
-typedef struct __attribute__((packed)) Particle {
+typedef struct Particle {
     Vec2 pos;
     Vec2 vel;
-    Vec3 color;
+    Vec4 color;
 } Particle;
 
 static ApiVersion _get_vulkan_api_version() {
@@ -612,7 +613,7 @@ static bool _create_pipeline(Context* ctx) {
     attrib_desc[1] = (VkVertexInputAttributeDescription){
         .binding = 0,
         .location = 1,
-        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .format = VK_FORMAT_R32G32B32A32_SFLOAT,
         .offset = sizeof(float) * 4,
     };
 
@@ -965,14 +966,14 @@ static bool _create_storage_buffers(Context* ctx) {
     VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(Particle);
 
     // Initial particles values 
-    Particle particles[PARTICLE_COUNT];
+    Particle* particles = aligned_alloc(sizeof(Particle), PARTICLE_COUNT * sizeof(Particle));
     for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
         Particle* p = &particles[i];
         p->pos = (Vec2){(i % ctx->swapchain.dim.width) / ctx->swapchain.dim.width, (i % ctx->swapchain.dim.height) / ctx->swapchain.dim.height};
         bool neg = rand() % 2;
         if (neg) p->vel = (Vec2){-(rand() % 300) / 100.0f, -(rand() % 300) / 100.0f};
         else p->vel = (Vec2){(rand() % 300) / 100.0f, (rand() % 300) / 100.0f};
-        p->color = (Vec3){(rand() % 50) / 100.0f + 0.5f, (rand() % 50) / 100.0f + 0.5f, (rand() % 50) / 100.0f + 0.5f};
+        p->color = (Vec4){(rand() % 50) / 100.0f + 0.3f, (rand() % 50) / 100.0f + 0.3f, (rand() % 50) / 100.0f + 0.3f, 1.0f};
     }
 
     GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, particles);
@@ -985,6 +986,7 @@ static bool _create_storage_buffers(Context* ctx) {
     }
 
     vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
+    free(particles);
 
     fprintf(stderr, "created gpu storage buffers\n");
 
@@ -1343,8 +1345,8 @@ int main() {
         ctx.push_constant.delta_time = current_time - last_time;
         ctx.push_constant.width = ctx.swapchain.dim.width;
         ctx.push_constant.height = ctx.swapchain.dim.height;
-
         last_time = current_time;
+        printf("FPS: %f\n", 1 / ctx.push_constant.delta_time);
 
         _render_loop(&ctx);
         glfwPollEvents();
