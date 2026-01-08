@@ -19,7 +19,8 @@
 
 #define FRAMES_IN_FLIGHT 3
 
-#define PARTICLE_COUNT 1000000
+#define PARTICLE_COUNT 10000
+#define FPS_SMOOTHING_FACTOR 0.1f
 
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
@@ -1340,13 +1341,16 @@ int main() {
 
     float current_time = glfwGetTime();
     float last_time = current_time;
+    float smoothed_dt = 0.0f;
     while (!glfwWindowShouldClose(window)) {
         current_time = glfwGetTime();
         ctx.push_constant.delta_time = current_time - last_time;
         ctx.push_constant.width = ctx.swapchain.dim.width;
         ctx.push_constant.height = ctx.swapchain.dim.height;
         last_time = current_time;
-        printf("FPS: %f\n", 1 / ctx.push_constant.delta_time);
+
+        smoothed_dt = smoothed_dt * (1.0 - FPS_SMOOTHING_FACTOR) + ctx.push_constant.delta_time * FPS_SMOOTHING_FACTOR;
+        printf("FPS: %f\n", 1 / smoothed_dt);
 
         _render_loop(&ctx);
         glfwPollEvents();
