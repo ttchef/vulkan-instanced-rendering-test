@@ -1,0 +1,31 @@
+
+#version 450 core 
+
+struct Particle {
+    vec2 pos;
+    vec2 vel;
+    vec3 color;
+};
+
+layout (push_constant) uniform Push {
+    float delta_time;
+} pc;
+
+layout (std140, binding = 0) readonly buffer Particle_ssbo_in {
+    Particle particles_in[];
+};
+
+layout (std140, binding = 1) buffer Particle_ssbo_out {
+    Particle particles_out[];
+};
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+
+    Particle p = particles_in[index];
+    particles_out[index].pos = p.pos + p.vel.xy * pc.delta_time;
+    particles_out[index].vel = p.vel;
+}
+

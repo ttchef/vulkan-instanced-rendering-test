@@ -11,10 +11,14 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include "vma.h"
+
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #define FRAMES_IN_FLIGHT 3
+
+#define PARTICLE_COUNT 1000
 
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
@@ -36,7 +40,22 @@ typedef struct FrameData {
     VkCommandBuffer cmd_buffer;
 } FrameData;
 
+typedef struct GpuBuffer {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+} GpuBuffer;
+
+typedef struct GpuQueue {
+    VkQueue queue;
+    int32_t index;
+} GpuQueue;
+
+typedef struct PushConstant {
+    float delta_time;
+} PushConstant;
+
 typedef struct Context {
+    VmaAllocator allocator;
     VkDebugUtilsMessengerEXT db_messenger;
     VkInstance instance;
     const char** layers;
@@ -47,22 +66,31 @@ typedef struct Context {
     GLFWwindow* win;
 
     VkPhysicalDevice phys_dev;
-    int32_t graphics_queue_family_index;
-    int32_t present_queue_family_index;
-
     VkDevice log_dev;
-    VkQueue graphics_queue;
-    VkQueue present_queue;
+
+    GpuQueue graphics_queue;
+    GpuQueue present_queue;
+    GpuQueue compute_queue;
 
     Swapchain swapchain;
 
     VkPipelineLayout pip_layout;
     VkPipeline pip;
 
+    VkPipelineLayout comp_pip_layout;
+    VkPipeline comp_pip;
+
     VkCommandPool cmd_pool;
     FrameData frame_data[FRAMES_IN_FLIGHT];
     int32_t frame_idx;
     int32_t img_idx;
+    
+    GpuBuffer storage_buffers[FRAMES_IN_FLIGHT];
+    VkDescriptorSet comp_set[FRAMES_IN_FLIGHT];
+    VkDescriptorSetLayout comp_set_layout;
+    VkDescriptorPool comp_set_pool;
+
+    PushConstant push_constant;
 } Context;
 
 typedef struct SwapchainInfo {
@@ -79,6 +107,23 @@ typedef struct ApiVersion {
     uint32_t minor;
     uint32_t patch;
 } ApiVersion;
+
+typedef struct Vec2 {
+    float x;
+    float y;
+} Vec2;
+
+typedef struct Vec3 {
+    float x;
+    float y;
+    float z;
+} Vec3;
+
+typedef struct __attribute__((packed)) Particle {
+    Vec2 pos;
+    Vec2 vel;
+    Vec3 color;
+} Particle;
 
 static ApiVersion _get_vulkan_api_version() {
     uint32_t instance_version;
@@ -102,6 +147,21 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL _debug_callback(
     fprintf(stderr, "Validation: %s\n", callback_data->pMessage);
 
     return VK_FALSE;
+}
+
+static bool _create_vma(Context* ctx) {
+    VmaAllocatorCreateInfo alloc_info = {
+        .physicalDevice = ctx->phys_dev,
+        .device = ctx->log_dev,
+        .instance = ctx->instance,
+    };
+
+    if (vmaCreateAllocator(&alloc_info, &ctx->allocator) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create vma\n");
+        return false;
+    }
+
+    return true;
 }
 
 static bool _device_extension_supported(Context* ctx, const char* name) {
@@ -210,7 +270,12 @@ static bool _pick_phys_dev(Context* ctx) {
 
         int32_t graphics_queue_family_index = -1;
         int32_t present_queue_family_index = -1;
+        int32_t compute_queue_family_index = -1;
         for (int32_t j = 0; j < n_queues; j++) {
+            if (props[j].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                compute_queue_family_index = j;
+            }
+
             if (props[j].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
                 graphics_queue_family_index = j;
             }
@@ -222,10 +287,11 @@ static bool _pick_phys_dev(Context* ctx) {
                 if (graphics_queue_family_index != -1) break;
             }
         }
-        if (graphics_queue_family_index != -1 && present_queue_family_index != -1) {
+        if (graphics_queue_family_index != -1 && present_queue_family_index != -1 && compute_queue_family_index != -1) {
             ctx->phys_dev = devs[i];
-            ctx->graphics_queue_family_index = graphics_queue_family_index;
-            ctx->present_queue_family_index = present_queue_family_index;
+            ctx->graphics_queue.index = graphics_queue_family_index;
+            ctx->present_queue.index = present_queue_family_index;
+            ctx->compute_queue.index = compute_queue_family_index;
             
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(ctx->phys_dev, &props);
@@ -248,16 +314,16 @@ static bool _create_logical_device(Context* ctx) {
     uint32_t n_queues = 0;
     queue_infos[0] = (VkDeviceQueueCreateInfo){
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = ctx->graphics_queue_family_index,
+        .queueFamilyIndex = ctx->graphics_queue.index,
         .queueCount = 1,
         .pQueuePriorities = &priority,
     };
     n_queues++;
 
-    if (ctx->graphics_queue_family_index != ctx->present_queue_family_index) {
+    if (ctx->graphics_queue.index != ctx->present_queue.index) {
         queue_infos[1] = (VkDeviceQueueCreateInfo){
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = ctx->present_queue_family_index,
+            .queueFamilyIndex = ctx->present_queue.index,
             .queueCount = 1,
             .pQueuePriorities = &priority,
         };
@@ -308,9 +374,9 @@ static bool _create_logical_device(Context* ctx) {
         return false;
     }
 
-    vkGetDeviceQueue(ctx->log_dev, ctx->graphics_queue_family_index, 0, &ctx->graphics_queue);
-    vkGetDeviceQueue(ctx->log_dev, ctx->present_queue_family_index, 0, &ctx->present_queue);
-
+    vkGetDeviceQueue(ctx->log_dev, ctx->graphics_queue.index, 0, &ctx->graphics_queue.queue);
+    vkGetDeviceQueue(ctx->log_dev, ctx->present_queue.index, 0, &ctx->present_queue.queue);
+    vkGetDeviceQueue(ctx->log_dev, ctx->compute_queue.index, 0, &ctx->compute_queue.queue);
 
     fprintf(stderr, "created logical device\n");
 
@@ -387,11 +453,11 @@ static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, 
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
     };
 
-    if (ctx->graphics_queue_family_index != ctx->present_queue_family_index) {
+    if (ctx->graphics_queue.index != ctx->present_queue.index) {
         swapchain_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         uint32_t families[2] = {
-            ctx->graphics_queue_family_index,
-            ctx->present_queue_family_index,
+            ctx->graphics_queue.index,
+            ctx->present_queue.index,
         };
         swapchain_info.pQueueFamilyIndices = families;
     }
@@ -528,23 +594,31 @@ static bool _create_pipeline(Context* ctx) {
 
     VkVertexInputBindingDescription binding_desc = {
         .binding = 0,
-        .stride = sizeof(float) * 3,
+        .stride = sizeof(Particle),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
     };
 
-    VkVertexInputAttributeDescription attrib_desc = {
+    VkVertexInputAttributeDescription attrib_desc[2];
+    attrib_desc[0] = (VkVertexInputAttributeDescription){
         .binding = 0,
         .location = 0,
-        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .format = VK_FORMAT_R32G32_SFLOAT,
         .offset = 0,
+    };
+
+    attrib_desc[1] = (VkVertexInputAttributeDescription){
+        .binding = 0,
+        .location = 1,
+        .format = VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = sizeof(float) * 4,
     };
 
     VkPipelineVertexInputStateCreateInfo vertex_input_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        /*.vertexBindingDescriptionCount = 1,
+        .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &binding_desc,
-        .vertexAttributeDescriptionCount = 1,
-        .pVertexAttributeDescriptions = &attrib_desc,*/
+        .vertexAttributeDescriptionCount = 2,
+        .pVertexAttributeDescriptions = attrib_desc,
     };
 
     VkPipelineInputAssemblyStateCreateInfo assembly_input_state = {
@@ -657,11 +731,56 @@ static bool _create_pipeline(Context* ctx) {
     return true;
 }
 
+static bool _create_compute_pipeline(Context* ctx) {
+    VkShaderModule comp_module;
+    _create_shader_module(ctx, &comp_module, "default_comp.spv");
+
+    VkPipelineShaderStageCreateInfo shader_stage = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = comp_module,
+        .pName = "main",
+    };
+
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .size = sizeof(PushConstant),
+    };
+
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+        .setLayoutCount = 1,
+        .pSetLayouts = &ctx->comp_set_layout,
+    };
+
+    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_pip_layout) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute pipeline layout\n");
+        return false;
+    }
+
+    VkComputePipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .layout = ctx->comp_pip_layout,
+        .stage = shader_stage,
+    };
+
+    if (vkCreateComputePipelines(ctx->log_dev, VK_NULL_HANDLE, 1, &create_info, NULL, &ctx->comp_pip) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute pipeline\n");
+        return false;
+    }
+
+    fprintf(stderr, "created compute pipeline\n");
+
+    return true;
+}
+
 static bool _create_frame_data(Context* ctx) {
     VkCommandPoolCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = ctx->graphics_queue_family_index,
+        .queueFamilyIndex = ctx->graphics_queue.index,
     };
 
     if (vkCreateCommandPool(ctx->log_dev, &create_info, NULL, &ctx->cmd_pool) != VK_SUCCESS) {
@@ -711,6 +830,259 @@ static bool _create_frame_data(Context* ctx) {
 
     fprintf(stderr, "created frame data\n");
 
+    return true;
+}
+
+static GpuBuffer _create_device_local_buffer(Context* ctx, VkDeviceSize size, VkBufferUsageFlags usage) {
+    GpuBuffer result = {0};
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .size = size,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_GPU_ONLY,
+    };
+
+    if (vmaCreateBuffer(ctx->allocator, &buffer_info, &alloc_info, &result.buffer, &result.allocation, NULL) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create device local buffer\n");
+        return (GpuBuffer){0};
+    }
+
+    return result;
+}
+
+static GpuBuffer _create_staging_buffer(Context* ctx, VkDeviceSize size, const void* data) {
+    GpuBuffer result = {0};
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .size = size,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_CPU_ONLY,
+    };
+
+    if (vmaCreateBuffer(ctx->allocator, &buffer_info, &alloc_info, &result.buffer, &result.allocation, NULL) != VK_SUCCESS) {
+        fprintf(stderr, "failed to cstagingg buffer\n");
+        return (GpuBuffer){0};
+    }
+
+    void* mapped;
+    vmaMapMemory(ctx->allocator, result.allocation, &mapped);
+    memcpy(mapped, data, size);
+    vmaUnmapMemory(ctx->allocator, result.allocation);
+
+    return result;
+}
+
+static bool _copy_buffer(Context* ctx, GpuBuffer* staging, GpuBuffer* buffer, VkDeviceSize size) {
+    VkCommandPool cmd_pool;
+    VkCommandBuffer cmd_buffer;
+
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = ctx->graphics_queue.index,
+    };
+
+    if (vkCreateCommandPool(ctx->log_dev, &pool_info, NULL, &cmd_pool) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create one time cmd pool for staging buffer copy\n");
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = cmd_pool,
+        .commandBufferCount = 1,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    };
+
+    if (vkAllocateCommandBuffers(ctx->log_dev, &alloc_info, &cmd_buffer) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create command buffers for copieng of staging buffer\n");
+        vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    if (vkBeginCommandBuffer(cmd_buffer, &begin_info) != VK_SUCCESS) {
+        fprintf(stderr, "failed to begin command buffer for copieng of staging buffer\n");
+        vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+        return false;
+    }
+
+    VkBufferCopy region = {
+        .size = size,
+    };
+
+    vkCmdCopyBuffer(cmd_buffer, staging->buffer, buffer->buffer, 1, &region);
+
+    if (vkEndCommandBuffer(cmd_buffer) != VK_SUCCESS) {
+        fprintf(stderr, "failed to end command buffer\n");
+        vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+        return false;
+    }
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd_buffer,
+    };
+
+    if (vkQueueSubmit(ctx->graphics_queue.queue, 1, &submit_info, 0) != VK_SUCCESS) {
+        fprintf(stderr, "failed to submit command buffer for staging buffer\n");
+        vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+        return false;
+    }
+
+    if (vkQueueWaitIdle(ctx->graphics_queue.queue) != VK_SUCCESS) {
+        fprintf(stderr, "failed to wait for queues\n");
+        vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+        return false;
+    }
+
+    vkDestroyCommandPool(ctx->log_dev, cmd_pool, NULL);
+
+    return true;
+}
+
+static bool _create_storage_buffers(Context* ctx) {
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(Particle);
+
+    // Initial particles values 
+    Particle particles[PARTICLE_COUNT];
+    for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
+        Particle* p = &particles[i];
+        p->pos = (Vec2){i % ctx->swapchain.dim.width, i % ctx->swapchain.dim.height};
+        p->vel = (Vec2){(rand() % 100) / 100.0f, (rand() % 100) / 100.0f};
+        p->color = (Vec3){(rand() % 100) / 100.0f, (rand() % 100) / 100.0f, (rand() % 100) / 100.0f};
+    }
+
+    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, particles);
+
+    for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        ctx->storage_buffers[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (!_copy_buffer(ctx, &staging_buffer, &ctx->storage_buffers[i], buffer_size)) return false;
+    }
+
+    vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
+
+    fprintf(stderr, "created gpu storage buffers\n");
+
+    return true;
+}
+
+static bool _create_descriptor_sets(Context* ctx) {
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(Particle);
+
+    VkDescriptorSetLayoutBinding bindings[2];
+
+    bindings[0] = (VkDescriptorSetLayoutBinding){
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    bindings[1] = (VkDescriptorSetLayoutBinding){
+        .binding = 1,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2,
+        .pBindings = bindings,
+    };
+
+    if (vkCreateDescriptorSetLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_set_layout) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute descriptor layout\n");
+        return false;
+    }
+
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = FRAMES_IN_FLIGHT * 2,
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = FRAMES_IN_FLIGHT * 2,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    };
+
+    if (vkCreateDescriptorPool(ctx->log_dev, &pool_info, NULL, &ctx->comp_set_pool) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute descriptor pool\n");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorSetAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = ctx->comp_set_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &ctx->comp_set_layout,
+        };
+
+        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &ctx->comp_set[i]) != VK_SUCCESS) {
+            fprintf(stderr, "failed to allocate compute descriptor sets\n");
+            return false;
+        }
+
+        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &ctx->comp_set[i * 2]) != VK_SUCCESS) {
+            fprintf(stderr, "failed to allocate compute descriptor sets\n");
+            return false;
+        }
+
+        VkWriteDescriptorSet writes[2];
+
+        VkDescriptorBufferInfo storage_last = {
+            .buffer = ctx->storage_buffers[(i - 1) % FRAMES_IN_FLIGHT].buffer,
+            .range = buffer_size,
+        };
+
+        writes[0] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = ctx->comp_set[i],
+            .dstBinding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &storage_last,
+        };
+
+        VkDescriptorBufferInfo storage_current = {
+            .buffer = ctx->storage_buffers[i].buffer,
+            .range = buffer_size,
+        };
+
+        writes[1] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = ctx->comp_set[i],
+            .dstBinding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &storage_current,
+        };
+        
+        vkUpdateDescriptorSets(ctx->log_dev, 2, writes, 0, NULL);
+    }
     return true;
 }
 
@@ -767,8 +1139,10 @@ static bool _record_command_buffers(Context* ctx) {
     };
 
     vkCmdBeginRendering(data->cmd_buffer, &render_info);
+ 
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(data->cmd_buffer, 0, 1, &ctx->storage_buffers[ctx->frame_idx].buffer, offsets);
 
-    // TODO: do draw call
     vkCmdDraw(data->cmd_buffer, 3, 1, 0, 0);
 
     vkCmdEndRendering(data->cmd_buffer);
@@ -795,9 +1169,54 @@ static bool _record_command_buffers(Context* ctx) {
     return true;
 }
 
+static bool _record_compute_command_buffers(Context* ctx) {
+    FrameData* data = &ctx->frame_data[ctx->frame_idx];
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    };
+
+    if (vkBeginCommandBuffer(data->cmd_buffer, &begin_info) != VK_SUCCESS) {
+        fprintf(stderr, "failed to begin recording compute command buffer\n");
+        return false;
+    }
+
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pip);
+    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pip_layout,
+                            0, 1, &ctx->comp_set[ctx->frame_idx], 0, NULL);
+    vkCmdPushConstants(data->cmd_buffer, ctx->comp_pip_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstant), &ctx->push_constant);
+    vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
+
+    if (vkEndCommandBuffer(data->cmd_buffer) != VK_SUCCESS) {
+        fprintf(stderr, "failed to end recording compute command buffer\n");
+        return false;
+    }
+
+    return true;
+}
+
 static bool _render_loop(Context* ctx) {
     FrameData* data = &ctx->frame_data[ctx->frame_idx];
     
+    vkWaitForFences(ctx->log_dev, 1, &data->in_flight_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(ctx->log_dev, 1, &data->in_flight_fence);
+
+    vkResetCommandBuffer(data->cmd_buffer, 0);
+    _record_compute_command_buffers(ctx);
+
+    VkSubmitInfo sub_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &data->cmd_buffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &data->finished,
+    };
+
+    if (vkQueueSubmit(ctx->compute_queue.queue, 1, &sub_info, data->in_flight_fence) != VK_SUCCESS) {
+        fprintf(stderr, "failed to submit compute queue\n");
+        return false;
+    }
+
     vkWaitForFences(ctx->log_dev, 1, &data->in_flight_fence, VK_TRUE, UINT64_MAX);
     vkResetFences(ctx->log_dev, 1, &data->in_flight_fence);
 
@@ -812,6 +1231,7 @@ static bool _render_loop(Context* ctx) {
 
     VkSemaphore wait_sems[] = {
         data->image_available,
+        data->finished,
     };
 
     VkPipelineStageFlags wait_stages[] = {
@@ -822,9 +1242,9 @@ static bool _render_loop(Context* ctx) {
         data->finished,
     };
 
-    VkSubmitInfo sub_info = {
+    VkSubmitInfo sub_info2 = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 1,
+        .waitSemaphoreCount = 2,
         .pWaitSemaphores = wait_sems,
         .pWaitDstStageMask = wait_stages,
         .commandBufferCount = 1,
@@ -833,7 +1253,7 @@ static bool _render_loop(Context* ctx) {
         .pSignalSemaphores = signal_sems,
     };
 
-    if (vkQueueSubmit(ctx->graphics_queue, 1, &sub_info, data->in_flight_fence) != VK_SUCCESS) {
+    if (vkQueueSubmit(ctx->graphics_queue.queue, 1, &sub_info2, data->in_flight_fence) != VK_SUCCESS) {
         fprintf(stderr, "failed to submit graphics queue\n");
         return false;
     }
@@ -847,7 +1267,7 @@ static bool _render_loop(Context* ctx) {
         .pImageIndices = &ctx->img_idx,
     };
 
-    if (vkQueuePresentKHR(ctx->graphics_queue, &present_info) != VK_SUCCESS) {
+    if (vkQueuePresentKHR(ctx->present_queue.queue, &present_info) != VK_SUCCESS) {
         fprintf(stderr, "failed to present graphics queue\n");
         return false;
     }
@@ -898,11 +1318,21 @@ int main() {
     if (!_create_vulkan_surface(&ctx)) exit(1);
     if (!_pick_phys_dev(&ctx)) exit(1);
     if (!_create_logical_device(&ctx)) exit(1);
+    if (!_create_vma(&ctx)) exit(1);
     if (!_create_swapchain(&ctx, &ctx.swapchain, 800, 600)) exit(1);
     if (!_create_pipeline(&ctx)) exit(1);
     if (!_create_frame_data(&ctx)) exit(1);
+    if (!_create_storage_buffers(&ctx)) exit(1);
+    if (!_create_descriptor_sets(&ctx)) exit(1);
+    if (!_create_compute_pipeline(&ctx)) exit(1);
 
+    float current_time = glfwGetTime();
+    float last_time = current_time;
     while (!glfwWindowShouldClose(window)) {
+        current_time = glfwGetTime();
+        ctx.push_constant.delta_time = current_time - last_time;
+        last_time = current_time;
+
         _render_loop(&ctx);
         glfwPollEvents();
     }
@@ -912,4 +1342,4 @@ int main() {
 
     return 0;
 }
-
+;
