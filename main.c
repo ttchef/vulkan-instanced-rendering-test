@@ -428,10 +428,44 @@ static bool _create_swapchain(Context* ctx, Swapchain* o_swapchain, uint32_t w, 
             return false;
         }
     }
-    
+
+    free(info.surf_fmts);
+    free(info.surf_present_modes);   
+
     fprintf(stderr, "created vulkan swapchain\n");
 
     return true;
+}
+
+static bool _destroy_swapchain(Context* ctx) {
+    if (ctx->swapchain.imgs) free(ctx->swapchain.imgs);
+
+    for (int32_t i = 0; i < ctx->swapchain.n_imgs; i++) {
+        vkDestroyImageView(ctx->log_dev, ctx->swapchain.imgs_viws[i], NULL);
+    }
+
+    if (ctx->swapchain.imgs_viws) free(ctx->swapchain.imgs_viws);
+
+    vkDestroySwapchainKHR(ctx->log_dev, ctx->swapchain.swapchain_handle, NULL);
+
+    return true;
+}
+
+static bool _recreate_swapchain(Context* ctx) {
+    vkDeviceWaitIdle(ctx->log_dev);
+    _destroy_swapchain(ctx);
+    
+    int32_t w, h;
+    glfwGetWindowSize(ctx->win, &w, &h);
+
+    if (!_create_swapchain(ctx, &ctx->swapchain, w, h)) exit(1);
+
+    return true;
+}
+
+void _on_resize(GLFWwindow* win, int32_t w, int32_t h) {
+    Context* ctx = glfwGetWindowUserPointer(win);
+    _recreate_swapchain(ctx);
 }
 
 static bool _create_shader_module(Context* ctx, VkShaderModule* module, const char* filename) {
@@ -851,6 +885,10 @@ int main() {
 
     Context ctx = {0};
     ctx.win = window;
+
+    glfwSetWindowSizeCallback(ctx.win, _on_resize);
+    glfwSetWindowUserPointer(ctx.win, &ctx);
+
     ctx.n_exts = n_exts;
     ctx.exts = exts;
     ctx.n_layers = 1;
