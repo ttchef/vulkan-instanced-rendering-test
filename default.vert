@@ -13,6 +13,7 @@ void main() {
     );
 
     gl_Position = vec4(in_pos, 0.0, 1.0);
+    gl_PointSize = 3.0;
 
     const vec3 col[3] = vec3[](
         vec3(1.0, 0.0, 0.0),
@@ -22,3 +23,4 @@ void main() {
 
     vColor = in_color;
 }
+

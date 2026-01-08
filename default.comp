@@ -9,6 +9,8 @@ struct Particle {
 
 layout (push_constant) uniform Push {
     float delta_time;
+    int width;
+    int height;
 } pc;
 
 layout (std140, binding = 0) readonly buffer Particle_ssbo_in {
@@ -25,6 +27,27 @@ void main() {
     uint index = gl_GlobalInvocationID.x;
 
     Particle p = particles_in[index];
+
+    if (p.pos.x < -1.0) {
+        p.pos.x = -1.0;
+        p.vel.x *= -1;
+    }
+
+    if (p.pos.x > 1.0) {
+        p.pos.x = 1.0;
+        p.vel.x *= -1;
+    }
+
+    if (p.pos.y < -1.0) {
+        p.pos.y = -1.0;
+        p.vel.y *= -1;
+    }
+
+    if (p.pos.y > 1.0) {
+        p.pos.y = 1.0;
+        p.vel.y *= -1;
+    }
+
     particles_out[index].pos = p.pos + p.vel.xy * pc.delta_time;
     particles_out[index].vel = p.vel;
 }

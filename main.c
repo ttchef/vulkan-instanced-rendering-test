@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -18,7 +19,7 @@
 
 #define FRAMES_IN_FLIGHT 3
 
-#define PARTICLE_COUNT 1000
+#define PARTICLE_COUNT 100000
 
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
@@ -52,6 +53,8 @@ typedef struct GpuQueue {
 
 typedef struct PushConstant {
     float delta_time;
+    int32_t width;
+    int32_t height;
 } PushConstant;
 
 typedef struct Context {
@@ -623,7 +626,7 @@ static bool _create_pipeline(Context* ctx) {
 
     VkPipelineInputAssemblyStateCreateInfo assembly_input_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
     };
 
     VkPipelineViewportStateCreateInfo viewport_state = {
@@ -965,9 +968,11 @@ static bool _create_storage_buffers(Context* ctx) {
     Particle particles[PARTICLE_COUNT];
     for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
         Particle* p = &particles[i];
-        p->pos = (Vec2){i % ctx->swapchain.dim.width, i % ctx->swapchain.dim.height};
-        p->vel = (Vec2){(rand() % 100) / 100.0f, (rand() % 100) / 100.0f};
-        p->color = (Vec3){(rand() % 100) / 100.0f, (rand() % 100) / 100.0f, (rand() % 100) / 100.0f};
+        p->pos = (Vec2){(i % ctx->swapchain.dim.width) / ctx->swapchain.dim.width, (i % ctx->swapchain.dim.height) / ctx->swapchain.dim.height};
+        bool neg = rand() % 2;
+        if (neg) p->vel = (Vec2){-(rand() % 300) / 100.0f, -(rand() % 300) / 100.0f};
+        else p->vel = (Vec2){(rand() % 300) / 100.0f, (rand() % 300) / 100.0f};
+        p->color = (Vec3){(rand() % 50) / 100.0f + 0.5f, (rand() % 50) / 100.0f + 0.5f, (rand() % 50) / 100.0f + 0.5f};
     }
 
     GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, particles);
@@ -1143,7 +1148,7 @@ static bool _record_command_buffers(Context* ctx) {
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(data->cmd_buffer, 0, 1, &ctx->storage_buffers[ctx->frame_idx].buffer, offsets);
 
-    vkCmdDraw(data->cmd_buffer, 3, 1, 0, 0);
+    vkCmdDraw(data->cmd_buffer, PARTICLE_COUNT, 1, 0, 0);
 
     vkCmdEndRendering(data->cmd_buffer);
 
@@ -1278,12 +1283,17 @@ static bool _render_loop(Context* ctx) {
 }
 
 int main() {
+    srand(time(0));
+
+    const int32_t width = 1200;
+    const int32_t height = 800;
+
     if (!glfwInit()) {
         return -1;
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Fire app", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(width, height, "Fire app", NULL, NULL);
     if (!window) {
         glfwTerminate();
         exit(1);
@@ -1319,7 +1329,7 @@ int main() {
     if (!_pick_phys_dev(&ctx)) exit(1);
     if (!_create_logical_device(&ctx)) exit(1);
     if (!_create_vma(&ctx)) exit(1);
-    if (!_create_swapchain(&ctx, &ctx.swapchain, 800, 600)) exit(1);
+    if (!_create_swapchain(&ctx, &ctx.swapchain, width, height)) exit(1);
     if (!_create_pipeline(&ctx)) exit(1);
     if (!_create_frame_data(&ctx)) exit(1);
     if (!_create_storage_buffers(&ctx)) exit(1);
@@ -1331,6 +1341,9 @@ int main() {
     while (!glfwWindowShouldClose(window)) {
         current_time = glfwGetTime();
         ctx.push_constant.delta_time = current_time - last_time;
+        ctx.push_constant.width = ctx.swapchain.dim.width;
+        ctx.push_constant.height = ctx.swapchain.dim.height;
+
         last_time = current_time;
 
         _render_loop(&ctx);
