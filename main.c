@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -16,6 +17,9 @@
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+#define RAD2DEG (M_PI / 360.0 * 2.0)
+#define DEG2RAD (360.0 / M_PI / 2.0)
 
 #define FRAMES_IN_FLIGHT 3
 
@@ -972,8 +976,21 @@ static bool _create_storage_buffers(Context* ctx) {
         Particle* p = &particles[i];
         p->pos = (Vec2){(i % ctx->swapchain.dim.width) / ctx->swapchain.dim.width, (i % ctx->swapchain.dim.height) / ctx->swapchain.dim.height};
         bool neg = rand() % 2;
+        bool neg2 = rand() % 2;
+
+        /* Old way
         if (neg) p->vel = (Vec2){-(rand() % 300) / 100.0f, -(rand() % 300) / 100.0f};
         else p->vel = (Vec2){(rand() % 300) / 100.0f, (rand() % 300) / 100.0f};
+        */
+
+        float vel_x = cosf(i * DEG2RAD);
+        float vel_y = sinf(i * DEG2RAD);
+
+        if (neg) vel_x *= -1.0f;
+        if (neg2) vel_y *= -1.0f;
+
+        p->vel = (Vec2){vel_x, vel_y};
+
         p->color = (Vec4){(rand() % 50) / 100.0f + 0.3f, (rand() % 50) / 100.0f + 0.3f, (rand() % 50) / 100.0f + 0.3f, 1.0f};
     }
 
@@ -1289,7 +1306,7 @@ int main() {
     srand(time(0));
 
     const int32_t width = 1200;
-    const int32_t height = 800;
+    const int32_t height = 1200;
 
     if (!glfwInit()) {
         return -1;
