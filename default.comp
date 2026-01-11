@@ -31,22 +31,22 @@ void main() {
 
     if (p.pos.x < -1.0) {
         p.pos.x = -1.0;
-        p.vel.x *= -1;
+        p.vel.x *= -0.7f;
     }
 
     if (p.pos.x > 1.0) {
         p.pos.x = 1.0;
-        p.vel.x *= -1;
+        p.vel.x *= -0.7f;
     }
 
     if (p.pos.y < -1.0) {
         p.pos.y = -1.0;
-        p.vel.y *= -1;
+        p.vel.y *= -0.7f;
     }
 
     if (p.pos.y > 1.0) {
         p.pos.y = 1.0;
-        p.vel.y *= -1;
+        p.vel.y *= -0.7f;
     }
 
     vec2 vel = p.vel.xy + vec2(0.0, pc.gravity) * pc.delta_time;
