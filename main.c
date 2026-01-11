@@ -23,7 +23,7 @@
 
 #define FRAMES_IN_FLIGHT 3
 
-#define PARTICLE_COUNT 10000
+#define PARTICLE_COUNT 100000
 #define FPS_SMOOTHING_FACTOR 0.1f
 
 typedef struct Swapchain {
@@ -58,6 +58,7 @@ typedef struct GpuQueue {
 
 typedef struct PushConstant {
     float delta_time;
+    float gravity;
     int32_t width;
     int32_t height;
 } PushConstant;
@@ -1364,6 +1365,7 @@ int main() {
         ctx.push_constant.delta_time = current_time - last_time;
         ctx.push_constant.width = ctx.swapchain.dim.width;
         ctx.push_constant.height = ctx.swapchain.dim.height;
+        ctx.push_constant.gravity = 50.0f;
         last_time = current_time;
 
         smoothed_dt = smoothed_dt * (1.0 - FPS_SMOOTHING_FACTOR) + ctx.push_constant.delta_time * FPS_SMOOTHING_FACTOR;
@@ -1377,5 +1379,5 @@ int main() {
     glfwTerminate();
 
     return 0;
-}
-;
+};
+

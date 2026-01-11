@@ -9,6 +9,7 @@ struct Particle {
 
 layout (push_constant) uniform Push {
     float delta_time;
+    float gravity;
     int width;
     int height;
 } pc;
@@ -48,7 +49,8 @@ void main() {
         p.vel.y *= -1;
     }
 
-    particles_out[index].pos = p.pos + p.vel.xy * pc.delta_time;
-    particles_out[index].vel = p.vel;
+    vec2 vel = p.vel.xy + vec2(0.0, pc.gravity) * pc.delta_time;
+    particles_out[index].pos = p.pos + vel * pc.delta_time;
+    particles_out[index].vel = vel;
 }
 
