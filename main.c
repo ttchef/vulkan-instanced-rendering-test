@@ -56,6 +56,11 @@ typedef struct GpuQueue {
     int32_t index;
 } GpuQueue;
 
+typedef struct GpuPipeline {
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+} GpuPipeline;
+
 typedef struct PushConstant {
     float delta_time;
     float gravity;
@@ -83,11 +88,8 @@ typedef struct Context {
 
     Swapchain swapchain;
 
-    VkPipelineLayout pip_layout;
-    VkPipeline pip;
-
-    VkPipelineLayout comp_pip_layout;
-    VkPipeline comp_pip;
+    GpuPipeline graphics_pip;
+    GpuPipeline comp_particle_update_pip;
 
     VkCommandPool cmd_pool;
     FrameData frame_data[FRAMES_IN_FLIGHT];
@@ -704,7 +706,7 @@ static bool _create_pipeline(Context* ctx) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
     };
 
-    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->pip_layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->graphics_pip.layout) != VK_SUCCESS) {
         fprintf(stderr, "failed to create pipeline layout\n");
         vkDestroyShaderModule(ctx->log_dev, vertex_module, NULL);
         vkDestroyShaderModule(ctx->log_dev, fragment_module, NULL);
@@ -716,7 +718,7 @@ static bool _create_pipeline(Context* ctx) {
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = &dynamic_info,
-        .layout = ctx->pip_layout,
+        .layout = ctx->graphics_pip.layout,
         .stageCount = 2,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input_state,
@@ -730,7 +732,7 @@ static bool _create_pipeline(Context* ctx) {
         .renderPass = VK_NULL_HANDLE, // just so we are really really sure
     };
 
-    if (vkCreateGraphicsPipelines(ctx->log_dev, 0, 1, &create_info, NULL, &ctx->pip) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(ctx->log_dev, 0, 1, &create_info, NULL, &ctx->graphics_pip.pipeline) != VK_SUCCESS) {
         fprintf(stderr, "failed to create vulkan pipeline\n");
         return false;
     }
@@ -767,18 +769,18 @@ static bool _create_compute_pipeline(Context* ctx) {
         .pSetLayouts = &ctx->comp_set_layout,
     };
 
-    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_pip_layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_particle_update_pip.layout) != VK_SUCCESS) {
         fprintf(stderr, "failed to create compute pipeline layout\n");
         return false;
     }
 
     VkComputePipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .layout = ctx->comp_pip_layout,
+        .layout = ctx->comp_particle_update_pip.layout,
         .stage = shader_stage,
     };
 
-    if (vkCreateComputePipelines(ctx->log_dev, VK_NULL_HANDLE, 1, &create_info, NULL, &ctx->comp_pip) != VK_SUCCESS) {
+    if (vkCreateComputePipelines(ctx->log_dev, VK_NULL_HANDLE, 1, &create_info, NULL, &ctx->comp_particle_update_pip.pipeline) != VK_SUCCESS) {
         fprintf(stderr, "failed to create compute pipeline\n");
         return false;
     }
@@ -1071,6 +1073,14 @@ static bool _create_start_indicies(Context* ctx) {
     return true;
 }
 
+static bool _create_gpu_buffers(Context* ctx) {
+    if (!_create_storage_buffers(ctx)) return false;
+    if (!_create_spatial_lookups(ctx)) return false;
+    if (!_create_start_indicies(ctx)) return false;
+
+    return true;
+}
+
 static bool _create_descriptor_sets(Context* ctx) {
     VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(Particle);
 
@@ -1183,7 +1193,7 @@ static bool _record_command_buffers(Context* ctx) {
         return false;
     }
 
-    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pip);
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphics_pip.pipeline);
 
     VkViewport viewport = {
         .width = ctx->swapchain.dim.width,
@@ -1266,10 +1276,10 @@ static bool _record_compute_command_buffers(Context* ctx) {
         return false;
     }
 
-    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pip);
-    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pip_layout,
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
+    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,
                             0, 1, &ctx->comp_set[ctx->frame_idx], 0, NULL);
-    vkCmdPushConstants(data->cmd_buffer, ctx->comp_pip_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstant), &ctx->push_constant);
+    vkCmdPushConstants(data->cmd_buffer, ctx->comp_particle_update_pip.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstant), &ctx->push_constant);
     vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
 
     if (vkEndCommandBuffer(data->cmd_buffer) != VK_SUCCESS) {
@@ -1412,9 +1422,7 @@ int main() {
     if (!_create_swapchain(&ctx, &ctx.swapchain, width, height)) exit(1);
     if (!_create_pipeline(&ctx)) exit(1);
     if (!_create_frame_data(&ctx)) exit(1);
-    if (!_create_storage_buffers(&ctx)) exit(1);
-    if (!_create_spatial_lookups(&ctx)) exit(1);
-    if (!_create_start_indicies(&ctx)) exit(1);
+    if (!_create_gpu_buffers(&ctx)) exit(1);
     if (!_create_descriptor_sets(&ctx)) exit(1);
     if (!_create_compute_pipeline(&ctx)) exit(1);
 
@@ -1430,7 +1438,7 @@ int main() {
         last_time = current_time;
 
         smoothed_dt = smoothed_dt * (1.0 - FPS_SMOOTHING_FACTOR) + ctx.push_constant.delta_time * FPS_SMOOTHING_FACTOR;
-        printf("FPS: %f\n", 1 / smoothed_dt);
+        //printf("FPS: %f\n", 1 / smoothed_dt);
 
         _render_loop(&ctx);
         glfwPollEvents();
