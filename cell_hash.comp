@@ -1,17 +1,34 @@
 
 #version 450 core 
 
-layout (std140, binding = 0) readonly buffer Particle_ssbo_in {
-    uint particles_in[];
+// TODO: get from push constant
+const float cell_size = 0.1f;
+const int particles_count = 100000;
+
+struct Particle {
+    vec2 pos;
+    vec2 vel;
+    vec4 color;
 };
 
-layout (std140, binding = 1) buffer Particle_ssbo_out {
-    uint particles_out[];
+layout (std140, binding = 0) readonly buffer Particle_ssbo_in {
+    Particle particles_in[];
+};
+
+layout (std140, binding = 1) buffer Spatial_lookup_ssbo_out {
+    uint spatial_lookups_out[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= particles_in.length()) return;
 
+    ivec2 cell = ivec2(floor(particles_in[i].pos / vec2(cell_size)));
+    int cell_hash = cell.x * 73856093 + cell.y * 19349663;
+    int cell_key = cell_hash % particles_count;
+    spatial_lookups_out[i] = cell_key;
 }
+
 

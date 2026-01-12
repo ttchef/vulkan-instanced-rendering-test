@@ -26,6 +26,9 @@
 #define PARTICLE_COUNT 100000
 #define FPS_SMOOTHING_FACTOR 0.1f
 
+// TODO: turn into push push_constant 
+#define CELL_SIZE 0.1f
+
 typedef struct ApiVersion {
     uint32_t major;
     uint32_t minor;
@@ -1185,7 +1188,7 @@ static bool _create_compute_buffer_descriptor(Context* ctx, GpuDescriptor* desc,
 static bool _create_compute_resources(Context* ctx) {
     // Cell Hash
     VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
-    _create_compute_buffer_descriptor(ctx, &ctx->comp_cell_hash_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->spatial_lookups);
+    _create_compute_buffer_descriptor(ctx, &ctx->comp_cell_hash_pip.descriptor, buffer_size, ctx->storage_buffers, ctx->spatial_lookups);
     _create_compute_pipeline(ctx, &ctx->comp_cell_hash_pip, "cell_hash.spv", NULL);
 
     // Radix Sort
@@ -1301,6 +1304,28 @@ static bool _record_compute_command_buffers(Context* ctx) {
         return false;
     }
 
+    // PASS 1: cell hash (spatial lookups)
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.pipeline);
+    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.layout,
+                            0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
+    vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
+
+    VkMemoryBarrier memory_barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+    };
+
+    vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+    // PASS 2: radix sort
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_radix_sort_pip.pipeline);
+    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_radix_sort_pip.layout,
+                            0, 1, &ctx->comp_radix_sort_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
+    vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
+
+    // PASS 3: particle update
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,
                             0, 1, &ctx->comp_particle_update_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
@@ -1463,7 +1488,7 @@ int main() {
         last_time = current_time;
 
         smoothed_dt = smoothed_dt * (1.0 - FPS_SMOOTHING_FACTOR) + ctx.push_constant.delta_time * FPS_SMOOTHING_FACTOR;
-        //printf("FPS: %f\n", 1 / smoothed_dt);
+        printf("FPS: %f\n", 1 / smoothed_dt);
 
         _render_loop(&ctx);
         glfwPollEvents();
