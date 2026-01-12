@@ -73,8 +73,8 @@ typedef struct GpuQueue {
 
 typedef struct GpuDescriptor {
     VkDescriptorPool pool;
-    VkDescriptorSet sets[FRAMES_IN_FLIGHT];
     VkDescriptorSetLayout layout;
+    VkDescriptorSet sets[FRAMES_IN_FLIGHT];
 } GpuDescriptor;
 
 typedef struct GpuPipeline {
@@ -124,9 +124,6 @@ typedef struct Context {
     GpuBuffer storage_buffers[FRAMES_IN_FLIGHT];
     GpuBuffer spatial_lookups[FRAMES_IN_FLIGHT];
     GpuBuffer start_indicies[FRAMES_IN_FLIGHT];
-    VkDescriptorSet comp_set[FRAMES_IN_FLIGHT];
-    VkDescriptorSetLayout comp_set_layout;
-    VkDescriptorPool comp_set_pool;
 
     PushConstant push_constant;
 } Context;
@@ -561,7 +558,7 @@ void _on_resize(GLFWwindow* win, int32_t w, int32_t h) {
 static bool _create_shader_module(Context* ctx, VkShaderModule* module, const char* filename) {
     FILE* shader_fd = fopen(filename, "rb");
     if (!shader_fd) {
-        fprintf(stderr, "failed to read vertex shader file\n");
+        fprintf(stderr, "failed to read shader file\n");
         return false;
     }
 
@@ -1121,12 +1118,12 @@ static bool _create_compute_buffer_descriptor(Context* ctx, GpuDescriptor* desc,
 
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = FRAMES_IN_FLIGHT * 2,
+        .descriptorCount = FRAMES_IN_FLIGHT,
     };
 
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = FRAMES_IN_FLIGHT * 2,
+        .maxSets = FRAMES_IN_FLIGHT,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     };
@@ -1145,11 +1142,6 @@ static bool _create_compute_buffer_descriptor(Context* ctx, GpuDescriptor* desc,
         };
 
         if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &desc->sets[i]) != VK_SUCCESS) {
-            fprintf(stderr, "failed to allocate compute descriptor sets\n");
-            return false;
-        }
-
-        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &desc->sets[i * 2]) != VK_SUCCESS) {
             fprintf(stderr, "failed to allocate compute descriptor sets\n");
             return false;
         }
@@ -1207,108 +1199,10 @@ static bool _create_compute_resources(Context* ctx) {
     // Particle updates
     buffer_size = PARTICLE_COUNT * sizeof(Particle);
     _create_compute_buffer_descriptor(ctx, &ctx->comp_particle_update_pip.descriptor, buffer_size, ctx->storage_buffers, ctx->storage_buffers);
-    _create_compute_pipeline(ctx, &ctx->comp_particle_update_pip, "particle_update.spv", NULL);
+    _create_compute_pipeline(ctx, &ctx->comp_particle_update_pip, "particle_update.spv", &ctx->push_constant);
 
-    return true;
-}
+    fprintf(stderr, "created compute descriptors and pipelines\n");
 
-static bool _create_descriptor_sets(Context* ctx) {
-    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(Particle);
-
-    VkDescriptorSetLayoutBinding bindings[2];
-
-    bindings[0] = (VkDescriptorSetLayoutBinding){
-        .binding = 0,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-    };
-
-    bindings[1] = (VkDescriptorSetLayoutBinding){
-        .binding = 1,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-    };
-
-    VkDescriptorSetLayoutCreateInfo layout_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 2,
-        .pBindings = bindings,
-    };
-
-    if (vkCreateDescriptorSetLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_set_layout) != VK_SUCCESS) {
-        fprintf(stderr, "failed to create compute descriptor layout\n");
-        return false;
-    }
-
-    VkDescriptorPoolSize pool_size = {
-        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = FRAMES_IN_FLIGHT * 2,
-    };
-
-    VkDescriptorPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = FRAMES_IN_FLIGHT * 2,
-        .poolSizeCount = 1,
-        .pPoolSizes = &pool_size,
-    };
-
-    if (vkCreateDescriptorPool(ctx->log_dev, &pool_info, NULL, &ctx->comp_set_pool) != VK_SUCCESS) {
-        fprintf(stderr, "failed to create compute descriptor pool\n");
-        return false;
-    }
-
-    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorSetAllocateInfo alloc_info = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = ctx->comp_set_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &ctx->comp_set_layout,
-        };
-
-        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &ctx->comp_set[i]) != VK_SUCCESS) {
-            fprintf(stderr, "failed to allocate compute descriptor sets\n");
-            return false;
-        }
-
-        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &ctx->comp_set[i * 2]) != VK_SUCCESS) {
-            fprintf(stderr, "failed to allocate compute descriptor sets\n");
-            return false;
-        }
-
-        VkWriteDescriptorSet writes[2];
-
-        VkDescriptorBufferInfo storage_last = {
-            .buffer = ctx->storage_buffers[(i - 1) % FRAMES_IN_FLIGHT].buffer,
-            .range = buffer_size,
-        };
-
-        writes[0] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = ctx->comp_set[i],
-            .dstBinding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &storage_last,
-        };
-
-        VkDescriptorBufferInfo storage_current = {
-            .buffer = ctx->storage_buffers[i].buffer,
-            .range = buffer_size,
-        };
-
-        writes[1] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = ctx->comp_set[i],
-            .dstBinding = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &storage_current,
-        };
-        
-        vkUpdateDescriptorSets(ctx->log_dev, 2, writes, 0, NULL);
-    }
     return true;
 }
 
@@ -1409,7 +1303,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
 
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,
-                            0, 1, &ctx->comp_set[ctx->frame_idx], 0, NULL);
+                            0, 1, &ctx->comp_particle_update_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
     vkCmdPushConstants(data->cmd_buffer, ctx->comp_particle_update_pip.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstant), &ctx->push_constant);
     vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
 
@@ -1440,6 +1334,7 @@ static bool _render_loop(Context* ctx) {
 
     if (vkQueueSubmit(ctx->compute_queue.queue, 1, &sub_info, data->in_flight_fence) != VK_SUCCESS) {
         fprintf(stderr, "failed to submit compute queue\n");
+        exit(1);
         return false;
     }
 
@@ -1554,8 +1449,7 @@ int main() {
     if (!_create_pipeline(&ctx)) exit(1);
     if (!_create_frame_data(&ctx)) exit(1);
     if (!_create_gpu_buffers(&ctx)) exit(1);
-    if (!_create_descriptor_sets(&ctx)) exit(1);
-    if (!_create_compute_pipelines(&ctx)) exit(1);
+    if (!_create_compute_resources(&ctx)) exit(1);
 
     float current_time = glfwGetTime();
     float last_time = current_time;
