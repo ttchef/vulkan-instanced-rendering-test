@@ -26,6 +26,21 @@
 #define PARTICLE_COUNT 100000
 #define FPS_SMOOTHING_FACTOR 0.1f
 
+typedef struct ApiVersion {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t patch;
+} ApiVersion;
+
+typedef struct SwapchainInfo {
+    VkSurfaceFormatKHR* surf_fmts;
+    uint32_t n_fmts;
+    VkPresentModeKHR* surf_present_modes;
+    uint32_t n_present_modes;
+
+    VkSurfaceCapabilitiesKHR caps;
+} SwapchainInfo;
+
 typedef struct Swapchain {
     VkSwapchainKHR swapchain_handle;
     VkImageView* imgs_viws;
@@ -56,9 +71,16 @@ typedef struct GpuQueue {
     int32_t index;
 } GpuQueue;
 
+typedef struct GpuDescriptor {
+    VkDescriptorPool pool;
+    VkDescriptorSet sets[FRAMES_IN_FLIGHT];
+    VkDescriptorSetLayout layout;
+} GpuDescriptor;
+
 typedef struct GpuPipeline {
     VkPipelineLayout layout;
     VkPipeline pipeline;
+    GpuDescriptor descriptor;
 } GpuPipeline;
 
 typedef struct PushConstant {
@@ -89,6 +111,9 @@ typedef struct Context {
     Swapchain swapchain;
 
     GpuPipeline graphics_pip;
+    GpuPipeline comp_cell_hash_pip;
+    GpuPipeline comp_radix_sort_pip;
+    GpuPipeline comp_start_indicies_pip;
     GpuPipeline comp_particle_update_pip;
 
     VkCommandPool cmd_pool;
@@ -105,21 +130,6 @@ typedef struct Context {
 
     PushConstant push_constant;
 } Context;
-
-typedef struct SwapchainInfo {
-    VkSurfaceFormatKHR* surf_fmts;
-    uint32_t n_fmts;
-    VkPresentModeKHR* surf_present_modes;
-    uint32_t n_present_modes;
-
-    VkSurfaceCapabilitiesKHR caps;
-} SwapchainInfo;
-
-typedef struct ApiVersion {
-    uint32_t major;
-    uint32_t minor;
-    uint32_t patch;
-} ApiVersion;
 
 typedef struct Vec2 {
     float x;
@@ -745,9 +755,9 @@ static bool _create_pipeline(Context* ctx) {
     return true;
 }
 
-static bool _create_compute_pipeline(Context* ctx) {
+static bool _create_compute_pipeline(Context* ctx, GpuPipeline* pipeline, const char* shader, PushConstant* push_constant) {
     VkShaderModule comp_module;
-    _create_shader_module(ctx, &comp_module, "default_comp.spv");
+    _create_shader_module(ctx, &comp_module, shader);
 
     VkPipelineShaderStageCreateInfo shader_stage = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -763,24 +773,24 @@ static bool _create_compute_pipeline(Context* ctx) {
 
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &push_range,
+        .pushConstantRangeCount = push_constant ? 1 : 0,
+        .pPushConstantRanges = push_constant ? &push_range : NULL,
         .setLayoutCount = 1,
-        .pSetLayouts = &ctx->comp_set_layout,
+        .pSetLayouts = &pipeline->descriptor.layout,
     };
 
-    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &ctx->comp_particle_update_pip.layout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(ctx->log_dev, &layout_info, NULL, &pipeline->layout) != VK_SUCCESS) {
         fprintf(stderr, "failed to create compute pipeline layout\n");
         return false;
     }
 
     VkComputePipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .layout = ctx->comp_particle_update_pip.layout,
+        .layout = pipeline->layout,
         .stage = shader_stage,
     };
 
-    if (vkCreateComputePipelines(ctx->log_dev, VK_NULL_HANDLE, 1, &create_info, NULL, &ctx->comp_particle_update_pip.pipeline) != VK_SUCCESS) {
+    if (vkCreateComputePipelines(ctx->log_dev, VK_NULL_HANDLE, 1, &create_info, NULL, &pipeline->pipeline) != VK_SUCCESS) {
         fprintf(stderr, "failed to create compute pipeline\n");
         return false;
     }
@@ -1077,6 +1087,127 @@ static bool _create_gpu_buffers(Context* ctx) {
     if (!_create_storage_buffers(ctx)) return false;
     if (!_create_spatial_lookups(ctx)) return false;
     if (!_create_start_indicies(ctx)) return false;
+
+    return true;
+}
+
+static bool _create_compute_buffer_descriptor(Context* ctx, GpuDescriptor* desc, VkDeviceSize buffer_size, GpuBuffer* in_buffer, GpuBuffer* out_buffer) {
+    VkDescriptorSetLayoutBinding bindings[2];
+
+    bindings[0] = (VkDescriptorSetLayoutBinding){
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    bindings[1] = (VkDescriptorSetLayoutBinding){
+        .binding = 1,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2,
+        .pBindings = bindings,
+    };
+
+    if (vkCreateDescriptorSetLayout(ctx->log_dev, &layout_info, NULL, &desc->layout) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute descriptor layout\n");
+        return false;
+    }
+
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = FRAMES_IN_FLIGHT * 2,
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = FRAMES_IN_FLIGHT * 2,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    };
+
+    if (vkCreateDescriptorPool(ctx->log_dev, &pool_info, NULL, &desc->pool) != VK_SUCCESS) {
+        fprintf(stderr, "failed to create compute descriptor pool\n");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorSetAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = desc->pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &desc->layout,
+        };
+
+        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &desc->sets[i]) != VK_SUCCESS) {
+            fprintf(stderr, "failed to allocate compute descriptor sets\n");
+            return false;
+        }
+
+        if (vkAllocateDescriptorSets(ctx->log_dev, &alloc_info, &desc->sets[i * 2]) != VK_SUCCESS) {
+            fprintf(stderr, "failed to allocate compute descriptor sets\n");
+            return false;
+        }
+
+        VkWriteDescriptorSet writes[2];
+
+        VkDescriptorBufferInfo storage_last = {
+            .buffer = in_buffer[(i - 1) % FRAMES_IN_FLIGHT].buffer,
+            .range = buffer_size,
+        };
+
+        writes[0] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = desc->sets[i],
+            .dstBinding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &storage_last,
+        };
+
+        VkDescriptorBufferInfo storage_current = {
+            .buffer = out_buffer[i].buffer,
+            .range = buffer_size,
+        };
+
+        writes[1] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = desc->sets[i],
+            .dstBinding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &storage_current,
+        };
+        
+        vkUpdateDescriptorSets(ctx->log_dev, 2, writes, 0, NULL);
+    }
+
+    return true;
+}
+
+static bool _create_compute_resources(Context* ctx) {
+    // Cell Hash
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
+    _create_compute_buffer_descriptor(ctx, &ctx->comp_cell_hash_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->spatial_lookups);
+    _create_compute_pipeline(ctx, &ctx->comp_cell_hash_pip, "cell_hash.spv", NULL);
+
+    // Radix Sort
+    _create_compute_buffer_descriptor(ctx, &ctx->comp_radix_sort_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->spatial_lookups);
+    _create_compute_pipeline(ctx, &ctx->comp_radix_sort_pip, "radix_sort.spv", NULL);
+
+    // Start Indicies
+    _create_compute_buffer_descriptor(ctx, &ctx->comp_start_indicies_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->start_indicies);
+    _create_compute_pipeline(ctx, &ctx->comp_start_indicies_pip, "start_indicies.spv", NULL);
+
+    // Particle updates
+    buffer_size = PARTICLE_COUNT * sizeof(Particle);
+    _create_compute_buffer_descriptor(ctx, &ctx->comp_particle_update_pip.descriptor, buffer_size, ctx->storage_buffers, ctx->storage_buffers);
+    _create_compute_pipeline(ctx, &ctx->comp_particle_update_pip, "particle_update.spv", NULL);
 
     return true;
 }
@@ -1424,7 +1555,7 @@ int main() {
     if (!_create_frame_data(&ctx)) exit(1);
     if (!_create_gpu_buffers(&ctx)) exit(1);
     if (!_create_descriptor_sets(&ctx)) exit(1);
-    if (!_create_compute_pipeline(&ctx)) exit(1);
+    if (!_create_compute_pipelines(&ctx)) exit(1);
 
     float current_time = glfwGetTime();
     float last_time = current_time;

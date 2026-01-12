@@ -4,7 +4,7 @@
 struct Particle {
     vec2 pos;
     vec2 vel;
-    vec3 color;
+    vec4 color;
 };
 
 layout (push_constant) uniform Push {
