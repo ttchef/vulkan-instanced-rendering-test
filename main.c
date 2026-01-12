@@ -23,7 +23,7 @@
 
 #define FRAMES_IN_FLIGHT 3
 
-#define PARTICLE_COUNT 100000
+#define PARTICLE_COUNT 256
 #define FPS_SMOOTHING_FACTOR 0.1f
 
 // TODO: turn into push push_constant 
@@ -864,7 +864,8 @@ static GpuBuffer _create_device_local_buffer(Context* ctx, VkDeviceSize size, Vk
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | 
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .size = size,
     };
@@ -886,7 +887,8 @@ static GpuBuffer _create_staging_buffer(Context* ctx, VkDeviceSize size, const v
 
     VkBufferCreateInfo buffer_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | 
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .size = size,
     };
@@ -896,7 +898,7 @@ static GpuBuffer _create_staging_buffer(Context* ctx, VkDeviceSize size, const v
     };
 
     if (vmaCreateBuffer(ctx->allocator, &buffer_info, &alloc_info, &result.buffer, &result.allocation, NULL) != VK_SUCCESS) {
-        fprintf(stderr, "failed to cstagingg buffer\n");
+        fprintf(stderr, "failed to create staging buffer\n");
         return (GpuBuffer){0};
     }
 
@@ -1075,6 +1077,7 @@ static bool _create_start_indicies(Context* ctx) {
         if (!_copy_buffer(ctx, &staging_buffer, &ctx->start_indicies[i], buffer_size)) return false;
     }
 
+    vkDeviceWaitIdle(ctx->log_dev);
     vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
     free(buffer);
 
@@ -1308,8 +1311,9 @@ static bool _record_compute_command_buffers(Context* ctx) {
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.layout,
                             0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
-    vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
+    vkCmdDispatch(data->cmd_buffer, 2, 1, 1);
 
+    /*
     VkMemoryBarrier memory_barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -1329,7 +1333,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
 
     // PASS 3: start indicies
-     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_start_indicies_pip.pipeline);
+    vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_start_indicies_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_start_indicies_pip.layout,
                             0, 1, &ctx->comp_start_indicies_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
     vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
@@ -1337,7 +1341,8 @@ static bool _record_compute_command_buffers(Context* ctx) {
     vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
 
-    // PASS 3: particle update
+    */
+    // PASS 4: particle update
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,
                             0, 1, &ctx->comp_particle_update_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
@@ -1430,6 +1435,24 @@ static bool _render_loop(Context* ctx) {
         return false;
     }
 
+    // Get Data back 
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
+    uint32_t* buffer = malloc(sizeof(uint32_t) * PARTICLE_COUNT);
+    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, buffer);
+    vkDeviceWaitIdle(ctx->log_dev);
+    _copy_buffer(ctx, &ctx->spatial_lookups[ctx->frame_idx], &staging_buffer, buffer_size);
+    vkDeviceWaitIdle(ctx->log_dev);
+    void* mapped;
+    vmaMapMemory(ctx->allocator, staging_buffer.allocation, &mapped);
+    memcpy(buffer, mapped, PARTICLE_COUNT * sizeof(uint32_t));
+    vmaUnmapMemory(ctx->allocator, staging_buffer.allocation);
+    vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
+
+    for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
+        fprintf(stderr, "%d: %u\n", i, buffer[i]);
+    }
+    exit(1);
+
     ctx->frame_idx = (ctx->frame_idx + 1) % FRAMES_IN_FLIGHT;
 
     return true;
@@ -1445,6 +1468,7 @@ int main() {
         return -1;
     }
 
+    glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(width, height, "Fire app", NULL, NULL);
     if (!window) {
@@ -1464,6 +1488,7 @@ int main() {
 
     const char* layers[] = {
         "VK_LAYER_KHRONOS_validation",
+        "VK_LAYER_LUNARG_api_dump",
     };
 
     Context ctx = {0};
@@ -1474,7 +1499,7 @@ int main() {
 
     ctx.n_exts = n_exts;
     ctx.exts = exts;
-    ctx.n_layers = 1;
+    ctx.n_layers = 2;
     ctx.layers = layers;
     if (!_create_instance(&ctx)) exit(1);
     if (!_create_debug_messenger(&ctx)) exit(1);
