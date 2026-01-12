@@ -1325,6 +1325,18 @@ static bool _record_compute_command_buffers(Context* ctx) {
                             0, 1, &ctx->comp_radix_sort_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
     vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
 
+    vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+    // PASS 3: start indicies
+     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_start_indicies_pip.pipeline);
+    vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_start_indicies_pip.layout,
+                            0, 1, &ctx->comp_start_indicies_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
+    vkCmdDispatch(data->cmd_buffer, PARTICLE_COUNT / 256, 1, 1);
+
+    vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
     // PASS 3: particle update
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,

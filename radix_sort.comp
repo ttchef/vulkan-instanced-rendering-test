@@ -1,12 +1,12 @@
 
 #version 450 core 
 
-layout (std140, binding = 0) readonly buffer Particle_ssbo_in {
-    uint particles_in[];
+layout (std140, binding = 0) readonly buffer Spatial_lookup_ssbo_in {
+    uint spatial_lookups_in[];
 };
 
-layout (std140, binding = 1) buffer Particle_ssbo_out {
-    uint particles_out[];
+layout (std140, binding = 1) buffer Spatial_lookup_ssbo_out {
+    uint spatial_lookups_out[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
