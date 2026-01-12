@@ -9,3 +9,4 @@ all:
 
 clean:
 	rm -rf main *.o *.spv
+

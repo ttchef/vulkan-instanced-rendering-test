@@ -95,6 +95,8 @@ typedef struct Context {
     int32_t img_idx;
     
     GpuBuffer storage_buffers[FRAMES_IN_FLIGHT];
+    GpuBuffer spatial_lookups[FRAMES_IN_FLIGHT];
+    GpuBuffer start_indicies[FRAMES_IN_FLIGHT];
     VkDescriptorSet comp_set[FRAMES_IN_FLIGHT];
     VkDescriptorSetLayout comp_set_layout;
     VkDescriptorPool comp_set_pool;
@@ -973,6 +975,11 @@ static bool _create_storage_buffers(Context* ctx) {
 
     // Initial particles values 
     Particle* particles = aligned_alloc(sizeof(Particle), PARTICLE_COUNT * sizeof(Particle));
+    if (!particles) {
+        fprintf(stderr, "failed to allocate particles with a count of: %d\n", PARTICLE_COUNT);
+        return false;
+    }
+
     for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
         Particle* p = &particles[i];
         p->pos = (Vec2){(i % ctx->swapchain.dim.width) / ctx->swapchain.dim.width, (i % ctx->swapchain.dim.height) / ctx->swapchain.dim.height};
@@ -1008,6 +1015,58 @@ static bool _create_storage_buffers(Context* ctx) {
     free(particles);
 
     fprintf(stderr, "created gpu storage buffers\n");
+
+    return true;
+}
+
+static bool _create_spatial_lookups(Context* ctx) {
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
+    uint32_t* buffer = aligned_alloc(sizeof(uint32_t), PARTICLE_COUNT * sizeof(uint32_t));
+    if (!buffer) {
+        fprintf(stderr, "failed to allocate buffer on cpu\n");
+        return false;
+    }
+
+    memset(buffer, 0, PARTICLE_COUNT * sizeof(uint32_t));
+
+    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, buffer);
+
+    for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        ctx->spatial_lookups[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
+                                                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (!_copy_buffer(ctx, &staging_buffer, &ctx->spatial_lookups[i], buffer_size)) return false;
+    }
+
+    vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
+    free(buffer);
+
+    fprintf(stderr, "created spartial lookup buffers\n");
+
+    return true;
+}
+
+static bool _create_start_indicies(Context* ctx) {
+    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
+    uint32_t* buffer = aligned_alloc(sizeof(uint32_t), PARTICLE_COUNT * sizeof(uint32_t));
+    if (!buffer) {
+        fprintf(stderr, "failed to allocate buffer on cpu\n");
+        return false;
+    }
+
+    memset(buffer, 0, PARTICLE_COUNT * sizeof(uint32_t));
+
+    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, buffer);
+
+    for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        ctx->start_indicies[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
+                                                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (!_copy_buffer(ctx, &staging_buffer, &ctx->start_indicies[i], buffer_size)) return false;
+    }
+
+    vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
+    free(buffer);
+
+    fprintf(stderr, "created start indicies buffers\n");
 
     return true;
 }
@@ -1354,6 +1413,8 @@ int main() {
     if (!_create_pipeline(&ctx)) exit(1);
     if (!_create_frame_data(&ctx)) exit(1);
     if (!_create_storage_buffers(&ctx)) exit(1);
+    if (!_create_spatial_lookups(&ctx)) exit(1);
+    if (!_create_start_indicies(&ctx)) exit(1);
     if (!_create_descriptor_sets(&ctx)) exit(1);
     if (!_create_compute_pipeline(&ctx)) exit(1);
 
