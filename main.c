@@ -128,6 +128,10 @@ typedef struct Context {
     GpuBuffer spatial_lookups[FRAMES_IN_FLIGHT];
     GpuBuffer start_indicies[FRAMES_IN_FLIGHT];
 
+    // Radix Sort Intermedies
+    GpuBuffer histogram[FRAMES_IN_FLIGHT];
+    GpuBuffer prefix_sum[FRAMES_IN_FLIGHT];
+
     PushConstant push_constant;
 } Context;
 
@@ -1033,63 +1037,43 @@ static bool _create_storage_buffers(Context* ctx) {
     return true;
 }
 
-static bool _create_spatial_lookups(Context* ctx) {
-    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
-    uint32_t* buffer = aligned_alloc(sizeof(uint32_t), PARTICLE_COUNT * sizeof(uint32_t));
-    if (!buffer) {
-        fprintf(stderr, "failed to allocate buffer on cpu\n");
+static bool _create_gpu_buffer(Context* ctx, VkDeviceSize buffer_size, GpuBuffer* buffer, VkBufferUsageFlagBits usage) {
+    uint32_t* cpu_buffer = malloc(buffer_size);
+    if (!cpu_buffer) {
+        fprintf(stderr, "failed to allocate cpu buffer\n");
         return false;
     }
 
-    memset(buffer, 0, PARTICLE_COUNT * sizeof(uint32_t));
+    memset(cpu_buffer, 0, buffer_size);
 
-    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, buffer);
+    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, cpu_buffer);
 
     for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        ctx->spatial_lookups[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
-                                                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        if (!_copy_buffer(ctx, &staging_buffer, &ctx->spatial_lookups[i], buffer_size)) return false;
+        buffer[i] = _create_device_local_buffer(ctx, buffer_size, usage);
+        if (!_copy_buffer(ctx, &staging_buffer, &buffer[i], buffer_size)) return false;
     }
 
     vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
-    free(buffer);
+    free(cpu_buffer);
 
-    fprintf(stderr, "created spartial lookup buffers\n");
-
-    return true;
-}
-
-static bool _create_start_indicies(Context* ctx) {
-    VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
-    uint32_t* buffer = aligned_alloc(sizeof(uint32_t), PARTICLE_COUNT * sizeof(uint32_t));
-    if (!buffer) {
-        fprintf(stderr, "failed to allocate buffer on cpu\n");
-        return false;
-    }
-
-    memset(buffer, 0, PARTICLE_COUNT * sizeof(uint32_t));
-
-    GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, buffer);
-
-    for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        ctx->start_indicies[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
-                                                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        if (!_copy_buffer(ctx, &staging_buffer, &ctx->start_indicies[i], buffer_size)) return false;
-    }
-
-    vkDeviceWaitIdle(ctx->log_dev);
-    vmaDestroyBuffer(ctx->allocator, staging_buffer.buffer, staging_buffer.allocation);
-    free(buffer);
-
-    fprintf(stderr, "created start indicies buffers\n");
+    fprintf(stderr, "created gpu buffer\n");
 
     return true;
 }
 
 static bool _create_gpu_buffers(Context* ctx) {
     if (!_create_storage_buffers(ctx)) return false;
-    if (!_create_spatial_lookups(ctx)) return false;
-    if (!_create_start_indicies(ctx)) return false;
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->spatial_lookups, 
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
+
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->start_indicies, 
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
+
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->histogram, 
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
+
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->prefix_sum, 
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
 
     return true;
 }
@@ -1311,7 +1295,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.layout,
                             0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
-    vkCmdDispatch(data->cmd_buffer, 2, 1, 1);
+    vkCmdDispatch(data->cmd_buffer, 8, 1, 1);
 
     /*
     VkMemoryBarrier memory_barrier = {
@@ -1451,7 +1435,6 @@ static bool _render_loop(Context* ctx) {
     for (int32_t i = 0; i < PARTICLE_COUNT; i++) {
         fprintf(stderr, "%d: %u\n", i, buffer[i]);
     }
-    exit(1);
 
     ctx->frame_idx = (ctx->frame_idx + 1) % FRAMES_IN_FLIGHT;
 
@@ -1468,7 +1451,7 @@ int main() {
         return -1;
     }
 
-    glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+    //glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(width, height, "Fire app", NULL, NULL);
     if (!window) {
@@ -1488,7 +1471,7 @@ int main() {
 
     const char* layers[] = {
         "VK_LAYER_KHRONOS_validation",
-        "VK_LAYER_LUNARG_api_dump",
+        //"VK_LAYER_LUNARG_api_dump",
     };
 
     Context ctx = {0};
@@ -1499,7 +1482,7 @@ int main() {
 
     ctx.n_exts = n_exts;
     ctx.exts = exts;
-    ctx.n_layers = 2;
+    ctx.n_layers = 1;
     ctx.layers = layers;
     if (!_create_instance(&ctx)) exit(1);
     if (!_create_debug_messenger(&ctx)) exit(1);
