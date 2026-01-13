@@ -1290,7 +1290,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
                             0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
     vkCmdDispatch(data->cmd_buffer, 1, 1, 1);
 
-    /*
+    
     VkMemoryBarrier memory_barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -1299,6 +1299,8 @@ static bool _record_compute_command_buffers(Context* ctx) {
 
     vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+    /*
 
     // PASS 2: radix sort
     for (uint32_t shift = 0; shift < 32; shift += 4) {
