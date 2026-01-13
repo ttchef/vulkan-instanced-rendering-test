@@ -861,7 +861,7 @@ static bool _create_frame_data(Context* ctx) {
     return true;
 }
 
-static GpuBuffer _create_device_local_buffer(Context* ctx, VkDeviceSize size, VkBufferUsageFlags usage) {
+static GpuBuffer _create_device_local_buffer(Context* ctx, VkDeviceSize size) {
     GpuBuffer result = {0};
 
     VkBufferCreateInfo buffer_info = {
@@ -1023,9 +1023,7 @@ static bool _create_storage_buffers(Context* ctx) {
     GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, particles);
 
     for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        ctx->storage_buffers[i] = _create_device_local_buffer(ctx, buffer_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        ctx->storage_buffers[i] = _create_device_local_buffer(ctx, buffer_size);
         if (!_copy_buffer(ctx, &staging_buffer, &ctx->storage_buffers[i], buffer_size)) return false;
     }
 
@@ -1037,7 +1035,7 @@ static bool _create_storage_buffers(Context* ctx) {
     return true;
 }
 
-static bool _create_gpu_buffer(Context* ctx, VkDeviceSize buffer_size, GpuBuffer* buffer, VkBufferUsageFlagBits usage) {
+static bool _create_gpu_buffer(Context* ctx, VkDeviceSize buffer_size, GpuBuffer* buffer) {
     uint32_t* cpu_buffer = malloc(buffer_size);
     if (!cpu_buffer) {
         fprintf(stderr, "failed to allocate cpu buffer\n");
@@ -1049,7 +1047,7 @@ static bool _create_gpu_buffer(Context* ctx, VkDeviceSize buffer_size, GpuBuffer
     GpuBuffer staging_buffer = _create_staging_buffer(ctx, buffer_size, cpu_buffer);
 
     for (int32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        buffer[i] = _create_device_local_buffer(ctx, buffer_size, usage);
+        buffer[i] = _create_device_local_buffer(ctx, buffer_size);
         if (!_copy_buffer(ctx, &staging_buffer, &buffer[i], buffer_size)) return false;
     }
 
@@ -1063,18 +1061,12 @@ static bool _create_gpu_buffer(Context* ctx, VkDeviceSize buffer_size, GpuBuffer
 
 static bool _create_gpu_buffers(Context* ctx) {
     if (!_create_storage_buffers(ctx)) return false;
-    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->spatial_lookups, 
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
-
-    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->start_indicies, 
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->spatial_lookups)) return false;
+    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->start_indicies)) return false;
 
     // 16 uint32_t size
-    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->histogram, 
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
-
-    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->prefix_sum, 
-                            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
+    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->histogram)) return false;
+    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->prefix_sum)) return false;
 
     return true;
 }
@@ -1298,6 +1290,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
                             0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
     vkCmdDispatch(data->cmd_buffer, 1, 1, 1);
 
+    /*
     VkMemoryBarrier memory_barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -1331,6 +1324,7 @@ static bool _record_compute_command_buffers(Context* ctx) {
 
     vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
+    */
 
     // PASS 4: particle update
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
