@@ -19,7 +19,7 @@ layout (std430, binding = 1) buffer Spatial_lookup_ssbo_out {
     uint spatial_lookups_out[];
 };
 
-layout (local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
     uint i = gl_WorkGroupID.x * gl_WorkGroupSize.x + gl_LocalInvocationID.x;

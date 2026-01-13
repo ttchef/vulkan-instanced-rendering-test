@@ -1,15 +1,30 @@
 
-all:
-	glslc -fshader-stage=vert default.vert -o default_vert.spv
-	glslc -fshader-stage=frag default.frag -o default_frag.spv
-	glslc -fshader-stage=comp cell_hash.comp -o cell_hash.spv
-	glslc -fshader-stage=comp radix_sort.comp -o radix_sort.spv
-	glslc -fshader-stage=comp start_indicies.comp -o start_indicies.spv
-	glslc -fshader-stage=comp particle_update.comp -o particle_update.spv
+SHADER_DIR = shaders
+COMP_DIR = $(SHADER_DIR)/compute
+RENDER_DIR = $(SHADER_DIR)/rendering
+
+SPV_DIR = $(SHADER_DIR)/spv
+
+all: compile_shaders
 	g++ -c vma.cpp -o vma.o
 	gcc -g -c main.c -o main.o
 	gcc main.o vma.o -o main -lglfw -lvulkan -lstdc++ -lm
 
+compile_shaders:
+	mkdir -p $(SPV_DIR)
+
+	@# Compile compute
+	@for file in $$(find $(SHADER_DIR)/* -maxdepth 2 -type f); do \
+		if [ -f "$$file" ]; then \
+			name=$$(basename $$file); \
+			base=$${name%.*}; \
+			ext=$${name##*.}; \
+			if [ $$ext != "spv" ]; then \
+				glslc -fshader-stage=$$ext $$file -o $(SPV_DIR)/$$base-$$ext.spv; \
+			fi\
+		fi \
+	done
+
 clean:
-	rm -rf main *.o *.spv
+	rm -rf main *.o $(SPV_DIR)
 

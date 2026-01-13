@@ -600,10 +600,10 @@ static bool _create_shader_module(Context* ctx, VkShaderModule* module, const ch
 static bool _create_pipeline(Context* ctx) {
 
     VkShaderModule vertex_module;
-    _create_shader_module(ctx, &vertex_module, "default_vert.spv");
+    _create_shader_module(ctx, &vertex_module, "shaders/spv/default-vert.spv");
 
     VkShaderModule fragment_module;
-    _create_shader_module(ctx, &fragment_module, "default_frag.spv");
+    _create_shader_module(ctx, &fragment_module, "shaders/spv/default-frag.spv");
 
     VkPipelineShaderStageCreateInfo shader_stages[2];
     shader_stages[0] = (VkPipelineShaderStageCreateInfo) {
@@ -1069,10 +1069,11 @@ static bool _create_gpu_buffers(Context* ctx) {
     if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->start_indicies, 
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
 
-    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->histogram, 
+    // 16 uint32_t size
+    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->histogram, 
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
 
-    if (!_create_gpu_buffer(ctx, PARTICLE_COUNT * sizeof(uint32_t), ctx->prefix_sum, 
+    if (!_create_gpu_buffer(ctx, 16 * sizeof(uint32_t), ctx->prefix_sum, 
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) return false;
 
     return true;
@@ -1176,20 +1177,20 @@ static bool _create_compute_resources(Context* ctx) {
     // Cell Hash
     VkDeviceSize buffer_size = PARTICLE_COUNT * sizeof(uint32_t);
     _create_compute_buffer_descriptor(ctx, &ctx->comp_cell_hash_pip.descriptor, buffer_size, ctx->storage_buffers, ctx->spatial_lookups);
-    _create_compute_pipeline(ctx, &ctx->comp_cell_hash_pip, "cell_hash.spv", NULL);
+    _create_compute_pipeline(ctx, &ctx->comp_cell_hash_pip, "shaders/spv/cell_hash-comp.spv", NULL);
 
     // Radix Sort
     _create_compute_buffer_descriptor(ctx, &ctx->comp_radix_sort_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->spatial_lookups);
-    _create_compute_pipeline(ctx, &ctx->comp_radix_sort_pip, "radix_sort.spv", NULL);
+    _create_compute_pipeline(ctx, &ctx->comp_radix_sort_pip, "shaders/spv/radix_sort-comp.spv", NULL);
 
     // Start Indicies
     _create_compute_buffer_descriptor(ctx, &ctx->comp_start_indicies_pip.descriptor, buffer_size, ctx->spatial_lookups, ctx->start_indicies);
-    _create_compute_pipeline(ctx, &ctx->comp_start_indicies_pip, "start_indicies.spv", NULL);
+    _create_compute_pipeline(ctx, &ctx->comp_start_indicies_pip, "shaders/spv/start_indicies-comp.spv", NULL);
 
     // Particle updates
     buffer_size = PARTICLE_COUNT * sizeof(Particle);
     _create_compute_buffer_descriptor(ctx, &ctx->comp_particle_update_pip.descriptor, buffer_size, ctx->storage_buffers, ctx->storage_buffers);
-    _create_compute_pipeline(ctx, &ctx->comp_particle_update_pip, "particle_update.spv", &ctx->push_constant);
+    _create_compute_pipeline(ctx, &ctx->comp_particle_update_pip, "shaders/spv/particle_update-comp.spv", &ctx->push_constant);
 
     fprintf(stderr, "created compute descriptors and pipelines\n");
 
@@ -1295,9 +1296,8 @@ static bool _record_compute_command_buffers(Context* ctx) {
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_cell_hash_pip.layout,
                             0, 1, &ctx->comp_cell_hash_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
-    vkCmdDispatch(data->cmd_buffer, 8, 1, 1);
+    vkCmdDispatch(data->cmd_buffer, 1, 1, 1);
 
-    /*
     VkMemoryBarrier memory_barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -1308,6 +1308,13 @@ static bool _record_compute_command_buffers(Context* ctx) {
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
 
     // PASS 2: radix sort
+    for (uint32_t shift = 0; shift < 32; shift += 4) {
+        // 1. Histrogram
+        // 2. Prefix Sum 
+        // 3. Write to output buffer 
+        // 4. Swap input and output buffers
+    };
+
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_radix_sort_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_radix_sort_pip.layout,
                             0, 1, &ctx->comp_radix_sort_pip.descriptor.sets[ctx->frame_idx], 0, NULL);
@@ -1325,7 +1332,6 @@ static bool _record_compute_command_buffers(Context* ctx) {
     vkCmdPipelineBarrier(data->cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &memory_barrier, 0, NULL, 0, NULL);
 
-    */
     // PASS 4: particle update
     vkCmdBindPipeline(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.pipeline);
     vkCmdBindDescriptorSets(data->cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_particle_update_pip.layout,
