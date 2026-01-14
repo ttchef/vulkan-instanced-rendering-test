@@ -19,7 +19,7 @@ layout (std430, binding = 1) buffer Histograms_ssbo_out {
     uint histograms_out[];
 };
 
-shared uint[RADIX_SORT_BINS] histograms;
+shared uint[RADIX_SORT_BINS] histogram;
 
 layout (local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
 
@@ -29,17 +29,21 @@ void main() {
     uint wID = gl_WorkGroupID.x;
 
     if (lID < RADIX_SORT_BINS) {
-        histograms[lID] = 0;
+        histogram[lID] = 0;
     }
     barrier();
 
     for (uint i; i < pc.num_blocks_per_workgroup; i++) {
-        // ...
+        uint elementId = wID * pc.num_blocks_per_workgroup * WORKGROUP_SIZE + i * WORKGROUP_SIZE + lID;
+        if (elementId < pc.num_elements) {
+            const uint bin = uint(spatial_lookups_in[elementId] >> pc.shift) & uint(RADIX_SORT_BINS - 1);
+            atomicAdd(histogram[bin], 1);
+        }
     }
     barrier();
 
     if (lID < RADIX_SORT_BINS) {
-        histograms_out[RADIX_SORT_BINS * wID * lID] = histograms[lID];
+        histograms_out[RADIX_SORT_BINS * wID * lID] = histogram[lID];
     }
 }
 
