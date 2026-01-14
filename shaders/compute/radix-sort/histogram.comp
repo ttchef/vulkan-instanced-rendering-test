@@ -1,6 +1,16 @@
 
 #version 450 core 
 
+const uint RADIX_SORT_BINS = 256;
+const uint WORKGROUP_SIZE = 256;
+
+layout (push_constant, std430) uniform Push {
+    uint num_elements;
+    uint shift;
+    uint num_workgroups;
+    uint num_blocks_per_workgroup;
+} pc;
+
 layout (std430, binding = 0) readonly buffer Spatial_lookup_ssbo_in {
     uint spatial_lookups_in[];
 };
@@ -9,11 +19,28 @@ layout (std430, binding = 1) buffer Histograms_ssbo_out {
     uint histograms_out[];
 };
 
-layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+shared uint[RADIX_SORT_BINS] histograms;
+
+layout (local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
-    uint i = gl_WorkGroupID.x * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    uint gID = gl_GlobalInvocationID.x;
+    uint lID = gl_LocalInvocationID.x;
+    uint wID = gl_WorkGroupID.x;
 
+    if (lID < RADIX_SORT_BINS) {
+        histograms[lID] = 0;
+    }
+    barrier();
+
+    for (uint i; i < pc.num_blocks_per_workgroup; i++) {
+        // ...
+    }
+    barrier();
+
+    if (lID < RADIX_SORT_BINS) {
+        histograms_out[RADIX_SORT_BINS * wID * lID] = histograms[lID];
+    }
 }
 
 
