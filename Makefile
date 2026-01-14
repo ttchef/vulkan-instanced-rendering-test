@@ -5,10 +5,14 @@ RENDER_DIR = $(SHADER_DIR)/rendering
 
 SPV_DIR = $(SHADER_DIR)/spv
 
-all: compile_shaders
-	g++ -c vma.cpp -o vma.o
+.PHONY: clean compile_shaders
+
+all: compile_shaders vma.o
 	gcc -g -c main.c -o main.o
 	gcc main.o vma.o -o main -lglfw -lvulkan -lstdc++ -lm
+
+vma.o: vma.cpp
+	g++ -c vma.cpp -o vma.o
 
 compile_shaders:
 	mkdir -p $(SPV_DIR)
@@ -27,4 +31,5 @@ compile_shaders:
 
 clean:
 	rm -rf main *.o $(SPV_DIR)
+
 
